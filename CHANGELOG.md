@@ -5,6 +5,10 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
 
 ---
 
+## 2026-07-16
+- feat: add ts-convert-from-qlik skill — convert a Qlik Sense app via the Qlik Cloud REST + Engine (QIX) APIs into ThoughtSpot Table + Model TML (expression/formula translation, Set Analysis + `Aggr()` handling) with optional sheet-to-liveboard migration. CLI-only (documented CoCo divergence); smoke test deferred (BL-116).
+- feat: add ts-convert-from-qlik-manual skill — no-API Qlik path: data model recovered from the warehouse (SOURCE), dashboard inferred from a PDF (INFERRED, flagged), generating Table + Model TML and optional Liveboards. CLI-only (documented CoCo divergence); smoke test deferred (BL-116).
+
 ## 2026-07-15
 - chore: ts-cli — add a `[snowflake]` optional-dependency extra and a clearer remedy message when `snowflake-connector-python` is missing for `method:python` profiles (covers `pip install 'thoughtspot-cli[snowflake]'` and the isolated `uv tool install ... --with` form). Aggregate advisor F2.
 - docs: add ts-object-model-aggregates `references/remediation-plan.md` (phased plan from the first end-to-end aggregate build) and route findings into open-items.md #18.

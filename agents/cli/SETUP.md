@@ -124,6 +124,12 @@ ln -s ~/thoughtspot-agent-skills/agents/cli/ts-convert-from-looker \
 ln -s ~/thoughtspot-agent-skills/agents/cli/ts-convert-from-tableau \
       ~/.snowflake/cortex/skills/ts-convert-from-tableau
 
+ln -s ~/thoughtspot-agent-skills/agents/cli/ts-convert-from-qlik \
+      ~/.snowflake/cortex/skills/ts-convert-from-qlik
+
+ln -s ~/thoughtspot-agent-skills/agents/cli/ts-convert-from-qlik-manual \
+      ~/.snowflake/cortex/skills/ts-convert-from-qlik-manual
+
 ln -s ~/thoughtspot-agent-skills/agents/cli/ts-profile-tableau \
       ~/.snowflake/cortex/skills/ts-profile-tableau
 
@@ -194,6 +200,12 @@ ln -s ~/thoughtspot-agent-skills/agents/cli/ts-convert-from-looker \
 
 ln -s ~/thoughtspot-agent-skills/agents/cli/ts-convert-from-tableau \
       ~/.claude/skills/ts-convert-from-tableau
+
+ln -s ~/thoughtspot-agent-skills/agents/cli/ts-convert-from-qlik \
+      ~/.claude/skills/ts-convert-from-qlik
+
+ln -s ~/thoughtspot-agent-skills/agents/cli/ts-convert-from-qlik-manual \
+      ~/.claude/skills/ts-convert-from-qlik-manual
 
 ln -s ~/thoughtspot-agent-skills/agents/cli/ts-profile-tableau \
       ~/.claude/skills/ts-profile-tableau
