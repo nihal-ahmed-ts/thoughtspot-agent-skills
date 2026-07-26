@@ -1,0 +1,25 @@
+{
+  "id": "61c4e63d-0627-41f7-b138-74968ebd7634",
+  "name": "Sample Sales Transactions",
+  "description": "Synthetic dataset modeled on Domo's Dataset Schema API for migration-testing purposes",
+  "rows": 12500,
+  "owner": {
+    "id": 587894148,
+    "type": "USER",
+    "displayName": "Bryan Van Kampen"
+  },
+  "schema": {
+    "columns": [
+      { "type": "STRING", "name": "Transaction ID" },
+      { "type": "DATETIME", "name": "Transaction Date" },
+      { "type": "STRING", "name": "Customer ID" },
+      { "type": "STRING", "name": "Product Category" },
+      { "type": "STRING", "name": "Region" },
+      { "type": "DOUBLE", "name": "Unit Price" },
+      { "type": "LONG", "name": "Quantity" },
+      { "type": "DOUBLE", "name": "Revenue" },
+      { "type": "DOUBLE", "name": "Discount" },
+      { "type": "STRING", "name": "Sales Rep" }
+    ]
+  }
+}

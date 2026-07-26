@@ -1,0 +1,56 @@
+{
+  "totalHits": 3,
+  "results": [
+    {
+      "id": 1001,
+      "name": "Net Revenue",
+      "owner": 587894148,
+      "lastModified": 1737590400000,
+      "created": 1737504000000,
+      "global": true,
+      "locked": false,
+      "status": "VALID",
+      "formula": "SUM(`Revenue`) - SUM(`Discount`)",
+      "dataSourceId": "61c4e63d-0627-41f7-b138-74968ebd7634",
+      "links": [
+        { "resource": { "type": "CARD", "id": "dr:1947052903:616023142" }, "visible": true, "active": true, "valid": "VALID" },
+        { "resource": { "type": "DATA_SOURCE", "id": "61c4e63d-0627-41f7-b138-74968ebd7634" }, "visible": false, "active": true, "valid": "VALID" }
+      ],
+      "archived": false
+    },
+    {
+      "id": 1002,
+      "name": "Avg Order Value",
+      "owner": 587894148,
+      "lastModified": 1737590400000,
+      "created": 1737504000000,
+      "global": true,
+      "locked": false,
+      "status": "VALID",
+      "formula": "SUM(`Revenue`) / COUNT(DISTINCT `Transaction ID`)",
+      "dataSourceId": "61c4e63d-0627-41f7-b138-74968ebd7634",
+      "links": [
+        { "resource": { "type": "CARD", "id": "dr:1947052903:616023143" }, "visible": true, "active": true, "valid": "VALID" }
+      ],
+      "archived": false
+    },
+    {
+      "id": 1003,
+      "name": "Discount Rate %",
+      "owner": 1893952720,
+      "lastModified": 1737676800000,
+      "created": 1737590400000,
+      "global": false,
+      "locked": false,
+      "status": "VALID",
+      "formula": "(SUM(`Discount`) / SUM(`Revenue`)) * 100",
+      "dataSourceId": "61c4e63d-0627-41f7-b138-74968ebd7634",
+      "links": [
+        { "resource": { "type": "CARD", "id": "dr:1947052903:616023144" }, "visible": true, "active": true, "valid": "VALID" }
+      ],
+      "archived": false
+    }
+  ],
+  "hasMore": false,
+  "degraded": false
+}
