@@ -1,0 +1,301 @@
+"""Unit tests for the `ts share` command layer — payload builders and pure helpers.
+
+`share.py` holds the payload builder, the shared lookups and the error translator;
+`share_planning.py` holds the export/resolve/apply pipeline and its pure helpers.
+"""
+from __future__ import annotations
+
+import pytest
+
+from ts_cli.commands.share import build_share_payload, explain_share_error
+from ts_cli.commands.share_planning import expand_uniform_grants, resolve_guids
+
+
+def _perm(group="Analyst", mode="READ_ONLY"):
+    return [{"principal": {"type": "USER_GROUP", "identifier": group}, "share_mode": mode}]
+
+
+def test_build_share_payload_puts_message_at_the_top_level():
+    """The single fact that blocks every share call if it is wrong.
+
+    Every published example nests `message` inside `notification`; the API rejects that
+    with `Variable "$message" of required type "String!" was not provided`. The
+    shareMetadata request schema agrees with the live behaviour: message and
+    notify_on_share are top-level, and message is required.
+    """
+    payload = build_share_payload(["guid-1"], "LOGICAL_TABLE", _perm(),
+                                  message="granting tenant access")
+    assert payload["message"] == "granting tenant access"
+    assert "notification" not in payload
+    assert payload["notify_on_share"] is False
+
+
+def test_build_share_payload_shape():
+    payload = build_share_payload(["g1", "g2"], "LOGICAL_COLUMN", _perm(),
+                                  message="m", notify_on_share=True)
+    assert payload == {
+        "metadata_type": "LOGICAL_COLUMN",
+        "metadata_identifiers": ["g1", "g2"],
+        "permissions": _perm(),
+        "message": "m",
+        "notify_on_share": True,
+    }
+
+
+def test_build_share_payload_accepts_logical_column():
+    """LOGICAL_COLUMN is absent from the docs' supported-object list but works."""
+    payload = build_share_payload(["c1"], "LOGICAL_COLUMN", _perm(), message="m")
+    assert payload["metadata_type"] == "LOGICAL_COLUMN"
+
+
+def test_build_share_payload_dedupes_identifiers_preserving_order():
+    payload = build_share_payload(["g2", "g1", "g2"], "LOGICAL_TABLE", _perm(), message="m")
+    assert payload["metadata_identifiers"] == ["g2", "g1"]
+
+
+def test_build_share_payload_rejects_unsupported_type():
+    with pytest.raises(ValueError, match="CONNECTION"):
+        build_share_payload(["g1"], "CONNECTION", _perm(), message="m")
+
+
+def test_build_share_payload_rejects_empty_identifiers():
+    with pytest.raises(ValueError, match="at least one object"):
+        build_share_payload([], "LOGICAL_TABLE", _perm(), message="m")
+
+
+def test_build_share_payload_rejects_empty_permissions():
+    with pytest.raises(ValueError, match="at least one principal"):
+        build_share_payload(["g1"], "LOGICAL_TABLE", [], message="m")
+
+
+def test_build_share_payload_rejects_blank_message():
+    """`message` is required by the schema, so an empty one fails server-side."""
+    with pytest.raises(ValueError, match="message"):
+        build_share_payload(["g1"], "LOGICAL_TABLE", _perm(), message="   ")
+
+
+def test_client_accepts_an_explicit_org_overriding_the_env(monkeypatch):
+    """Per-Org grants need a per-Org token without mutating process state."""
+    from ts_cli import client as client_module
+
+    profiles = {"p": {"base_url": "https://example.thoughtspot.cloud",
+                      "token_env": "THOUGHTSPOT_TOKEN_P"}}
+    monkeypatch.setattr(client_module, "load_profiles", lambda: profiles)
+    monkeypatch.setenv("TS_ORG", "Primary")
+
+    scoped = client_module.ThoughtSpotClient("p", org="ORG1")
+    assert scoped._org == "ORG1"
+    assert "org1" in scoped._cache_key()
+
+    default = client_module.ThoughtSpotClient("p")
+    assert default._org == "Primary"
+
+
+# ---------------------------------------------------------------------------
+# ts share resolve — the pure helpers
+# ---------------------------------------------------------------------------
+
+_OBJECTS = [
+    {"guid": "tbl-1", "name": "T2_PUBLISH", "type": "LOGICAL_TABLE", "subtype": "",
+     "columns": [{"guid": "col-prod", "name": "PROD_NM"},
+                 {"guid": "col-amt", "name": "AMOUNT"}]},
+    {"guid": "lb-1", "name": "Sales LB", "type": "LIVEBOARD", "subtype": "", "columns": []},
+]
+
+
+def test_expand_uniform_grants_object_level_across_orgs_and_groups():
+    grants = expand_uniform_grants(_OBJECTS, ["ORG1", "ORG2"], ["Analyst"], "READ_ONLY")
+    assert len(grants) == 4  # 2 objects x 2 orgs x 1 group
+    assert {g["org_name"] for g in grants} == {"ORG1", "ORG2"}
+    assert all(g["column_name"] == "" for g in grants)
+    assert all(g["share_mode"] == "READ_ONLY" for g in grants)
+
+
+def test_expand_uniform_grants_column_level_only_touches_named_columns():
+    grants = expand_uniform_grants(_OBJECTS, ["ORG1"], ["Analyst"], "READ_ONLY",
+                                   columns=["PROD_NM"])
+    assert [g["column_name"] for g in grants] == ["PROD_NM"]
+    assert grants[0]["object_identifier"] == "T2_PUBLISH"
+
+
+def test_expand_uniform_grants_rejects_a_column_no_object_has():
+    with pytest.raises(ValueError, match="NOPE"):
+        expand_uniform_grants(_OBJECTS, ["ORG1"], ["Analyst"], "READ_ONLY", columns=["NOPE"])
+
+
+def test_expand_uniform_grants_requires_groups():
+    with pytest.raises(ValueError, match="--group"):
+        expand_uniform_grants(_OBJECTS, ["ORG1"], [], "READ_ONLY")
+
+
+def test_expand_uniform_grants_requires_orgs():
+    with pytest.raises(ValueError, match="--org"):
+        expand_uniform_grants(_OBJECTS, [], ["Analyst"], "READ_ONLY")
+
+
+def test_expand_uniform_grants_rejects_an_unknown_share_mode():
+    with pytest.raises(ValueError, match="WRITE"):
+        expand_uniform_grants(_OBJECTS, ["ORG1"], ["Analyst"], "WRITE")
+
+
+def test_resolve_guids_fills_object_and_column_guids():
+    grants = [{"org_name": "ORG1", "object_identifier": "T2_PUBLISH",
+               "object_type": "LOGICAL_TABLE", "column_name": "PROD_NM",
+               "group_name": "Analyst", "share_mode": "READ_ONLY"}]
+    resolved = resolve_guids(grants, _OBJECTS)
+    assert resolved[0]["object_guid"] == "tbl-1"
+    assert resolved[0]["column_guid"] == "col-prod"
+
+
+def test_resolve_guids_matches_an_object_by_guid_as_well_as_name():
+    grants = [{"org_name": "ORG1", "object_identifier": "tbl-1",
+               "object_type": "LOGICAL_TABLE", "column_name": "",
+               "group_name": "Analyst", "share_mode": "READ_ONLY"}]
+    assert resolve_guids(grants, _OBJECTS)[0]["object_guid"] == "tbl-1"
+
+
+def test_resolve_guids_rejects_an_object_not_in_the_envelope():
+    grants = [{"org_name": "ORG1", "object_identifier": "MISSING",
+               "object_type": "LOGICAL_TABLE", "column_name": "",
+               "group_name": "Analyst", "share_mode": "READ_ONLY"}]
+    with pytest.raises(ValueError, match="MISSING"):
+        resolve_guids(grants, _OBJECTS)
+
+
+def test_resolve_guids_rejects_a_column_the_table_does_not_have():
+    grants = [{"org_name": "ORG1", "object_identifier": "T2_PUBLISH",
+               "object_type": "LOGICAL_TABLE", "column_name": "NOPE",
+               "group_name": "Analyst", "share_mode": "READ_ONLY"}]
+    with pytest.raises(ValueError, match="NOPE"):
+        resolve_guids(grants, _OBJECTS)
+
+
+def test_resolve_guids_corrects_a_manifest_object_type_from_the_envelope():
+    """A manifest that guessed LOGICAL_TABLE for a Liveboard is corrected, not trusted."""
+    grants = [{"org_name": "ORG1", "object_identifier": "Sales LB",
+               "object_type": "LOGICAL_TABLE", "column_name": "",
+               "group_name": "Analyst", "share_mode": "READ_ONLY"}]
+    assert resolve_guids(grants, _OBJECTS)[0]["object_type"] == "LIVEBOARD"
+
+
+# ---------------------------------------------------------------------------
+# ts share apply — error translation
+# ---------------------------------------------------------------------------
+
+def test_explain_share_error_translates_the_nested_message_mistake():
+    body = ('{"error":{"message":"Variable \\"$message\\" of required type '
+            '\\"String!\\" was not provided."}}')
+    text = explain_share_error(body)
+    assert text is not None
+    assert "top level" in text.lower()
+    assert "notification" in text
+
+
+def test_explain_share_error_translates_a_missing_principal():
+    body = ('{"error":{"message":{"code":13003,"debug":"Principal object does not exist '
+            'corresponding to the identifier Analystt"}}}')
+    text = explain_share_error(body)
+    assert text is not None
+    assert "Analystt" in text
+    assert "per-Org" in text
+
+
+def test_explain_share_error_returns_none_for_an_unrecognised_body():
+    assert explain_share_error('{"error":{"message":"something else entirely"}}') is None
+    assert explain_share_error("") is None
+
+
+# ---------------------------------------------------------------------------
+# Org scoping — the silent-wrong-org guard
+# ---------------------------------------------------------------------------
+
+def _patch_org_index(monkeypatch, index):
+    """Stub the orgs/search lookup and clear the per-profile cache."""
+    from ts_cli.commands import share as share_module
+
+    share_module._ORG_INDEX_CACHE.clear()
+    monkeypatch.setattr(share_module, "_org_name_to_id", lambda client, key: index)
+    monkeypatch.setattr(share_module, "ThoughtSpotClient",
+                        lambda profile_name, org=None: ("client", profile_name, org))
+    monkeypatch.setattr(share_module, "resolve_profile", lambda p: p or "p")
+    return share_module
+
+
+def test_client_for_org_resolves_a_name_to_its_numeric_id(monkeypatch):
+    """auth/token/full honours org_id (int) and SILENTLY IGNORES a name.
+
+    Verified live 2026-07-26 on nebula-damian-alias: TS_ORG=ORG1 minted a token whose
+    current_org was {id: 0, name: Primary}. Passing the name through would apply a
+    tenant's grants in the Primary Org while reporting success, so the name must be
+    resolved to its id before the client is built.
+    """
+    share_module = _patch_org_index(monkeypatch, {"ORG1": 12750490, "Primary": 0})
+    assert share_module._client_for_org("p", "ORG1") == ("client", "p", "12750490")
+
+
+def test_client_for_org_passes_a_numeric_org_through(monkeypatch):
+    share_module = _patch_org_index(monkeypatch, {"ORG1": 12750490})
+    assert share_module._client_for_org("p", "12750490") == ("client", "p", "12750490")
+
+
+def test_client_for_org_without_an_org_builds_an_unscoped_client(monkeypatch):
+    share_module = _patch_org_index(monkeypatch, {"ORG1": 12750490})
+    assert share_module._client_for_org("p") == ("client", "p", None)
+
+
+def test_client_for_org_refuses_an_unknown_org_name(monkeypatch):
+    import typer
+
+    share_module = _patch_org_index(monkeypatch, {"ORG1": 12750490, "Primary": 0})
+    with pytest.raises(typer.BadParameter, match="NoSuchOrg"):
+        share_module._client_for_org("p", "NoSuchOrg")
+
+
+def test_assert_org_context_refuses_a_session_in_the_wrong_org(monkeypatch):
+    """The defence-in-depth guard: org scoping can fail silently, so read it back."""
+    import typer
+
+    from ts_cli.commands import share as share_module
+
+    share_module._ORG_INDEX_CACHE.clear()
+    monkeypatch.setattr(share_module, "_org_name_to_id",
+                        lambda client, key: {"ORG1": 12750490, "Primary": 0})
+    monkeypatch.setattr(share_module, "resolve_profile", lambda p: p or "p")
+    monkeypatch.setattr(share_module, "ThoughtSpotClient",
+                        lambda profile_name, org=None: ("client", profile_name, org))
+
+    class _Resp:
+        @staticmethod
+        def json():
+            return {"current_org": {"id": 0, "name": "Primary"}}
+
+    class _Client:
+        @staticmethod
+        def get(_path):
+            return _Resp()
+
+    with pytest.raises(typer.BadParameter, match="Primary"):
+        share_module.assert_org_context(_Client(), "ORG1", "p")
+
+
+def test_assert_org_context_accepts_a_matching_session(monkeypatch):
+    from ts_cli.commands import share as share_module
+
+    share_module._ORG_INDEX_CACHE.clear()
+    monkeypatch.setattr(share_module, "_org_name_to_id",
+                        lambda client, key: {"ORG1": 12750490})
+    monkeypatch.setattr(share_module, "resolve_profile", lambda p: p or "p")
+    monkeypatch.setattr(share_module, "ThoughtSpotClient",
+                        lambda profile_name, org=None: ("client", profile_name, org))
+
+    class _Resp:
+        @staticmethod
+        def json():
+            return {"current_org": {"id": 12750490, "name": "ORG1"}}
+
+    class _Client:
+        @staticmethod
+        def get(_path):
+            return _Resp()
+
+    assert share_module.assert_org_context(_Client(), "ORG1", "p") is None
