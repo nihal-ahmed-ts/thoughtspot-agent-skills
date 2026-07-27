@@ -22,6 +22,33 @@ definition, page). Two source modes:
 Ask one question at a time for **dependent** decisions (where the next depends on the answer);
 **batch independent** questions into a single prompt to keep the migration fast.
 
+## On invocation — establish the two paths first
+
+Before running anything, settle **two independent choices** with the user. They combine freely
+(e.g. offline files → import to a live cluster is valid).
+
+**1. Source path — how will the Domo dashboard be read?**
+
+| Choice | What the user provides | Notes |
+|---|---|---|
+| **Offline (files)** — *default* | A **directory** of exported Domo JSON: one file per dataset, the beast-mode list, each card, and the page (the layout of `tests/fixtures/domo/`). | No Domo credentials. Best-effort; gaps flagged. |
+| **API (live)** | Sets up a Domo profile (`/ts-profile-domo`): instance URL + OAuth2 client credentials. | Pulls exact definitions live (SOURCE provenance). |
+
+If the user is unsure, use **offline** — it needs only exported files.
+
+**2. Output path — TML files or created live in ThoughtSpot?**
+
+| Choice | Result | Requires |
+|---|---|---|
+| **TML files** — *default* | Generated Table / Model / Answer / Liveboard TML + `mapping.json` land in `out/`. Nothing is written to any ThoughtSpot instance. | nothing |
+| **Direct create** | The skill additionally **imports** the TML so the objects are created on the user's cluster. | a `ts-profile-thoughtspot` profile (login/auth) |
+
+Default to **TML files**. Only run the `ts tml import` steps if the user opts into direct-create
+**and** a ThoughtSpot profile exists — otherwise stop at the TML in `out/` and tell them how to
+import later. Confirm the target profile before any import.
+
+Confirm both choices before Step 0.
+
 ## References
 
 | File | Purpose |
@@ -117,4 +144,5 @@ rebuild.
 
 | Version | Date | Summary |
 |---|---|---|
+| 0.2.0 | (offline build) | `ts domo` CLI implemented for **offline** mode — parse / build-model / build-liveboard, Beast Mode translation, join inference, tests green. Live `domo-cloud` client still pending. |
 | 0.1.0 | (scaffold) | Skill structure, IR contract, Beast Mode mapping, fixtures — CLI impl pending |
