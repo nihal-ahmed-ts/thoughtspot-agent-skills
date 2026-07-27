@@ -1,0 +1,21 @@
+{
+  "id": "8f2d0c1a-4b3e-4a0f-9c1d-2e7a6b5c9d10",
+  "name": "Customer Master",
+  "description": "Synthetic reference dataset for testing dataset-to-dataset joins during Domo -> ThoughtSpot migration",
+  "rows": 3400,
+  "owner": {
+    "id": 1893952720,
+    "type": "USER",
+    "displayName": "Jae Wilson"
+  },
+  "schema": {
+    "columns": [
+      { "type": "STRING", "name": "Customer ID" },
+      { "type": "STRING", "name": "Customer Name" },
+      { "type": "STRING", "name": "Segment" },
+      { "type": "STRING", "name": "Country" },
+      { "type": "STRING", "name": "Account Owner" },
+      { "type": "DATETIME", "name": "Onboarded Date" }
+    ]
+  }
+}
