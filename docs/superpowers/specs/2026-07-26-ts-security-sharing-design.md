@@ -26,7 +26,7 @@ materially different capabilities, and which one applies is dictated by publicat
 |---|---|---|
 | API | `security/metadata/share` | `security/column/rules/update` + `/fetch` |
 | TML | **No.** Permissions live outside TML | **Yes**, a separate document (§2.4) |
-| Works on published objects | Yes | **No** |
+| Works on published objects | Yes | Accepted and enforced, but Org-scoped: a tenant Org the object is published to stays unprotected (§2.7) |
 | Declaration model | Enumerate every **visible** column per group | Declare only the **restricted** columns |
 | Liveboard filter on a secured column | Liveboard **locks** | Stays interactive |
 | Interacts with table-level share | Yes — a table share defeats it (§2.2) | No, independent axis (§2.5) |
@@ -97,6 +97,22 @@ second rule, confirmed by reading back through the API. Two gotchas:
 - `clear_csr: true` alone is rejected; `column_security_rules: []` must accompany it,
   though the docs imply the flag is sufficient.
 
+**Corrected 2026-07-26 against the canonical spec** (`get-rest-api-reference`, operations
+`fetchColumnSecurityRules` and `updateColumnSecurityRules`). Four things this section got
+wrong or missed; see
+[`2026-07-26-ts-security-column-rules-cli-design.md`](2026-07-26-ts-security-column-rules-cli-design.md) §1
+for the detail:
+
+- CSR is **not** purely declarative. Each column rule's `group_access` names an
+  `operation`: `ADD`, `REMOVE` or `REPLACE`. The API is both incremental and declarative,
+  which is what makes an idempotent `set` possible.
+- `update` takes **one table per call** (`identifier` is a scalar). The "all or none"
+  rollback is per call, not per run, so multi-table work is a loop the caller owns.
+- The `clear_csr` rejection above is **schema validation, not a bug**:
+  `column_security_rules` is a required field. It will not be "fixed", so always emit both.
+- Per-column **`is_unsecured: true`** exists, distinct from whole-table `clear_csr`.
+  Unsecuring one column does not require a read-modify-write of the table.
+
 ### 2.5 CSR is independent of the share ACL
 
 With CSR active on two columns, the table's grant list was unchanged. CSR governs column
@@ -108,6 +124,22 @@ filters the way CLS does.
 Before enablement every CSR call returned `403 code 10023`,
 `Column Security rule feature is disabled`. Any skill must detect this and say so, rather
 than surfacing a bare 403.
+
+### 2.7 CSR on a published object is accepted, but Org-scoped -- supersedes the earlier "No"
+
+Expected, per this section's original wording (and §1's comparison table): the platform
+refuses to define CSR on a published object. Observed instead, live-verified with real
+non-admin user sessions on `nebula-damian-alias`: a CSR rule restricting a column to a group
+is **accepted** (`HTTP 204`) on a table published from Primary into tenant Org ORG1, and is
+**enforced in Primary**, hiding the column from an out-of-group user on both the Table and
+the Model -- but the same column stayed fully **visible** in ORG1. A CSR rule is scoped to
+the Org it was defined in and does not travel with publication.
+
+This supersedes the flat "No" this document and `docs/multi-tenancy-platform-plan.md` §4.3
+previously stated. The operating consequence: configure CSR per Org, against that Org's own
+groups, because groups are per-Org and a rule defined against one Org's group names cannot
+reach across the Org boundary. Full evidence:
+`docs/superpowers/verification/2026-07-26-ts-security-column-rules-live-verification.md` §15.
 
 ---
 
@@ -256,9 +288,10 @@ liveboard count are what should decide that per tenant, not a blanket rule.
 | # | Item | Status |
 |---|---|---|
 | 1 | Can a group holding only column grants reach the table at all, or does it also need a table-level grant of some kind? | OPEN. §2.5 shows CSR is independent of the ACL, but the CLS equivalent is untested |
-| 2 | Does strict object security have to be enabled for CLS to behave as documented? | OPEN. The recording says yes; not verified |
-| 3 | Does CSR TML survive a lift-and-shift into a different Org, given the `table:` reference is by name? | OPEN. Matters for migration 5.3 |
+| 2 | Does strict object security have to be enabled for CLS to behave as documented? | **ANSWERED: yes.** Strict Object Mode must be on for column-level sharing to apply to a Model. It cannot be read through any available REST API, and CLS grants applied without it succeed silently and do nothing. `ts share resolve` now warns whenever a plan carries column grants. Confirmed by the repo owner. |
+| 3 | Does CSR TML survive a lift-and-shift into a different Org, given the `table:` reference is by name? | **ANSWERED: only where a same-named table exists.** Importing a CSR document into an Org that lacks the table fails with error code 14502 and a message naming the table, so the reference resolves per-Org by name. Verified live. |
 | 4 | Behaviour of `share_mode: NO_ACCESS` on a column that was never granted | OPEN, likely a harmless no-op |
+| 5 | Whether a tenant Org can be given *usable* CSR at all, given that group names do not resolve across the Org boundary (a rule naming a Primary group is meaningless in a tenant Org) | OPEN. §2.7 settles that a rule set in the owning Org does not travel; still unverified is whether a rule configured directly in a tenant Org, against that Org's own groups, behaves as documented there |
 
 None block building `ts share`, which rests only on verified behaviour.
 
@@ -268,7 +301,11 @@ None block building `ts share`, which rests only on verified behaviour.
 
 1. **`ts share` CLI** — object + column grants, the manifest, the exclusivity check.
    Unblocks `ts-publish-orgs` Step 12 immediately.
-2. **`ts security column-rules get|set|clear`** — the CSR API path.
+2. **`ts security column-rules`**, the CSR path, both routes. Designed in
+   [`2026-07-26-ts-security-column-rules-cli-design.md`](2026-07-26-ts-security-column-rules-cli-design.md):
+   `get` / `export` read, `resolve` plans, `apply` executes over the API, and
+   `build` / `import` executes over TML. Scoped wider than the "API path" named here
+   because the two routes share one plan, and §5.3's TML preservation needs the export.
 3. **`ts-security-columns` skill** — the decision layer over both, CSR path mirroring
    `ts alias`.
 4. **Migration additions** — `CSR_BLOCKER`, the opt-in mapping, CSR TML preservation.

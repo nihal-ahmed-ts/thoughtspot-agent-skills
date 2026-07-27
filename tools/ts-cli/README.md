@@ -1571,6 +1571,184 @@ group also adds a row per member user, so one group grant shows up as several ro
 
 ---
 
+### `ts security column-rules` -- Column Security Rules (CSR)
+
+Restricts named columns on a Table to named groups, over
+`POST /api/rest/2.0/security/column/rules/update` (read via the sibling `.../fetch`).
+**Beta**, requires **10.12.0.cl or later**, and is **feature-flagged off by default**:
+until ThoughtSpot enables it on a cluster, every call returns 403 with code 10023,
+which the CLI detects and explains rather than surfacing a bare "Forbidden".
+
+CSR is **not** column-level sharing. `ts share` carries that mechanism (CLS), and the
+two must not be modelled the same way -- they are different mechanisms on different
+axes:
+
+- **CSR is two steps over two orthogonal mechanisms.** The object must first be
+  shared (the Model, and optionally the Table) or the user cannot open it at all; CSR
+  then filters columns *within* that access. Access and column visibility are separate
+  decisions, which is why CSR composes cleanly with a table-level share.
+- **CLS is one step.** The grant IS the security: sharing specific columns is the one
+  act that decides both whether the user reaches the object and which columns they
+  see. That is also why CLS refuses to mix a table grant and a column grant for the
+  same (Org, table, group) -- under CLS they are the same mechanism at different
+  granularities, so the broader defeats the narrower. CSR has no equivalent rule,
+  because it is never the mechanism deciding access in the first place.
+
+| | CLS (`ts share`) | CSR (here) |
+|---|---|---|
+| Works on published objects | yes | refused BY DEFAULT at plan time AND by `set` (the platform itself accepts an owning-Org CSR update on a published table and enforces it there -- but the rule does not travel with publication, so every tenant Org keeps the column visible; see below) |
+| Declares | every VISIBLE column per group | only the RESTRICTED columns |
+| Liveboard filter on a secured column | locks | stays interactive |
+| Availability | GA | Beta, 10.12+, feature-flagged off by default |
+
+Two routes over one plan, mirroring `ts alias` and `ts share`:
+
+```bash
+# 1. Plan
+ts security column-rules resolve --source uniform --org ORG1 --org ORG2 \
+  --table T2_PUBLISH --rule "COST=Finance" --rule "SALARY=" -p prod > plan.json
+
+# 2a. Route A: apply the plan over the API
+ts security column-rules apply --input plan.json --dry-run -p prod
+ts security column-rules apply --input plan.json -p prod
+
+# 2b. Route B: apply the plan over TML instead
+ts security column-rules build --input plan.json --out ./plan/csr
+ts security column-rules import \
+  --file ./plan/csr/ORG1/T2_PUBLISH_CSR.column_security_rules.tml --org ORG1 -p prod
+```
+
+`build --out` writes one file per (Org, table), into a subdirectory per Org, because a
+plan step is per (Org, table) while the platform's filename is derived from the table
+alone. Without the subdirectory, two Orgs' documents for one table would resolve to the
+same path and the first Org's rules would be lost silently. The filename inside it is
+exactly what the platform exports, so `import` consumes either.
+
+The two routes agree on everything but one thing: `is_unsecured` (pruning a column) has
+no TML equivalent, so a plan carrying `unsecure` entries can only be fully carried out
+by `apply` -- `build` reports the gap on stderr and simply omits those columns from the
+document.
+
+**`update` takes one table per call.** Its documented "all or none" rollback covers a
+single call, not a whole `apply` run: a failure part-way through leaves the tables
+already processed changed, and the command stops rather than continuing, so the plan
+and reality diverge at a known point. Re-running a REPLACE plan is safe -- it converges.
+
+**Only the columns named are touched.** A column already secured and not mentioned in a
+manifest, or in a `set` call, is left exactly as it was. **Live-verified** (2026-07-27,
+cluster `nebula-damian-alias`): securing one column for one group, then a separate column
+for a different group in a second `set` call, left both rules in place side by side -- a
+per-column `REPLACE` is genuinely scoped to that column, not a whole-table replace.
+Verified for REPLACE on a single table; `set` itself is unchanged.
+
+`resolve --prune` is the only way to unsecure columns that are secured today but absent
+from the manifest, and it is opt-in: the alternative default would silently unsecure
+columns whenever a manifest was incomplete, which leaks data, whereas leaving stale
+protection in place is visible and recoverable.
+
+**Published tables are refused by default** -- at plan time as `CSR_BLOCKED` (`resolve`
+/`build`/`apply`), and by `set` directly -- but this is not a platform restriction. It is
+a scoping trap. **Live-verified 2026-07-27, conclusively** (data-plane, real non-admin
+users, both Orgs): with a table genuinely published to a tenant Org, a CSR update issued
+from the OWNING Org returned HTTP 204, took effect, and stayed enforced there -- a
+restricted column stayed hidden in the owning Org. But the SAME table, opened in the
+tenant Org it was published to, showed the restricted column in full: no error, no
+warning, either way. **A CSR rule is scoped to the Org that defined it and does not
+travel with publication.** Setting one on a published table protects the owning Org and
+silently leaves every tenant Org exposed, which is exactly the false belief refusing by
+default exists to prevent. `resolve` marks the affected step in the plan rather than
+failing outright; `build` and `apply` both then refuse any plan containing one, before
+anything is rendered or sent; `set` refuses directly, with no separate plan stage.
+`--allow-published` overrides the refusal (`apply --allow-published`, `set
+--allow-published`) for the case where owning-Org-only scope is genuinely what is
+wanted -- `build` has no equivalent flag. See the live-verification doc (§Q6) for the
+full evidence.
+
+A table whose publication state could not be READ is blocked the same way, with its own
+reason. Only a successful read supports the claim that a table is unpublished, so a failed
+`metadata/search` (a 403 where the CSR flag is off, a 500, no hit) warns on stderr and
+blocks the step rather than passing it as unpublished. `resolve` writes nothing, so a
+false block costs a re-run while a false pass applies CSR to a published object.
+
+Manifest table (`TS_COLUMN_SECURITY_RULES`), readable as CSV with the same columns:
+
+```sql
+TS_COLUMN_SECURITY_RULES (org_name, table_name, column_name, group_name)
+-- group_name: blank = secured, no group can see it
+-- PRIMARY KEY (org_name, table_name, column_name, group_name)
+```
+
+#### The eight commands
+
+`get` reads current CSR, one row per (table, column), for one or more tables and Orgs:
+
+```bash
+ts security column-rules get T1 T2 T3_PUBLISH --org ORG1 --org ORG2 -p prod
+```
+
+`export` pulls each table's `column_security_rules` TML document (needs
+`export_options.export_column_security_rules: true`, itself Beta):
+
+```bash
+ts security column-rules export T2_PUBLISH --out ./plan/csr --org ORG1 -p prod
+```
+
+`resolve` turns a rule manifest into a reviewable plan, from `--source uniform`
+(explicit `--table`/`--org`/`--rule` flags), `file` (`--csv`), or `db`
+(`--sf-profile`/`--table-name`); `--init-table` prints the manifest table's
+`CREATE TABLE` DDL and exits:
+
+```bash
+ts security column-rules resolve --init-table                    # CREATE TABLE DDL, then exit
+ts security column-rules resolve --source uniform --org ORG1 --org ORG2 \
+  --table T2_PUBLISH --rule "COST=Finance" --rule "SALARY=" -p prod
+```
+
+`apply` sends a plan over the API, one `rules/update` call per (Org, table):
+
+```bash
+ts security column-rules apply --input plan.json -p prod
+```
+
+`build` renders a plan into `column_security_rules` TML documents, emit-only (no
+profile, no connection, nothing sent), one file per (Org, table) under `<out>/<org>/`:
+
+```bash
+ts security column-rules build --input plan.json --out ./plan/csr
+# -> ./plan/csr/ORG1/T2_PUBLISH_CSR.column_security_rules.tml
+# -> ./plan/csr/ORG2/T2_PUBLISH_CSR.column_security_rules.tml
+```
+
+`import` uploads a `column_security_rules` TML document (`create_new: false`, so a
+`guid:` at the document root updates in place rather than creating a new one):
+
+```bash
+ts security column-rules import --file T2_CSR.column_security_rules.tml -p prod
+```
+
+`set` is a one-shot imperative that needs no manifest. It is declarative (REPLACE) by
+default, so it is idempotent: running it twice converges, and a `get` before and after
+diffs cleanly. `--add` / `--remove` reach the incremental operations instead. `set`
+refuses a published table by default, the same as the manifest route -- `--allow-published`
+overrides it:
+
+```bash
+ts security column-rules set --table T2 --rule "COST=Finance,Audit" --rule "SALARY=" \
+  --org ORG1 -p prod
+```
+
+`clear` unsecures one column (`--column`) or every column on a table (omit it). Unlike
+`set`, `clear` is **not** blocked on a published table -- deliberately: `set` guards
+against creating a false belief that a column is protected everywhere, while `clear`
+only ever removes protection the operator explicitly asked to remove, including the
+legitimate case of cleaning stale CSR off a table that turned out to be published:
+
+```bash
+ts security column-rules clear --table T2_PUBLISH --column COST -p prod
+```
+
+---
+
 ### `ts tableau signin`
 
 Sign in to Tableau Server/Cloud and verify credentials.

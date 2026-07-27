@@ -5,10 +5,22 @@
 """
 from __future__ import annotations
 
-import pytest
+import json
 
+import pytest
+from typer.testing import CliRunner
+
+from ts_cli.cli import app
 from ts_cli.commands.share import build_share_payload, explain_share_error
 from ts_cli.commands.share_planning import expand_uniform_grants, resolve_guids
+
+# See the Global Constraints section: `runner` is stream-separated so result.stdout is
+# parseable JSON; `msg_runner` mixes, which is the only way to see a manual stderr print.
+try:
+    runner = CliRunner(mix_stderr=False)
+except TypeError:            # Click >= 8.2 removed the parameter
+    runner = CliRunner()
+msg_runner = CliRunner()
 
 
 def _perm(group="Analyst", mode="READ_ONLY"):
@@ -89,6 +101,72 @@ def test_client_accepts_an_explicit_org_overriding_the_env(monkeypatch):
 
     default = client_module.ThoughtSpotClient("p")
     assert default._org == "Primary"
+
+
+# ---------------------------------------------------------------------------
+# ts share resolve -- _try_search / _resolve_object and the SystemExit gotcha
+# ---------------------------------------------------------------------------
+
+def test_try_search_swallows_a_system_exit():
+    """`client.py` raises SystemExit (not Exception) on an API error. `_try_search`'s
+    whole documented purpose is to swallow one candidate's failure so the next can
+    run; before the fix `except Exception` let a SystemExit through and killed the
+    process instead.
+    """
+    from ts_cli.commands.share import _try_search
+
+    class _Client:
+        @staticmethod
+        def post(_path, json=None):
+            raise SystemExit(1)
+
+    assert _try_search(_Client(), {"identifier": "T2_PUBLISH"}, 10) == []
+
+
+def test_try_search_swallows_a_plain_exception():
+    from ts_cli.commands.share import _try_search
+
+    class _Client:
+        @staticmethod
+        def post(_path, json=None):
+            raise RuntimeError("boom")
+
+    assert _try_search(_Client(), {"identifier": "T2_PUBLISH"}, 10) == []
+
+
+def test_resolve_object_falls_through_to_a_typed_probe_after_a_system_exit():
+    """Live-observed 2026-07-27: resolving a table BY NAME probes untyped first
+    (`{"identifier": name}`), which the platform rejects with HTTP 400 code 10002
+    ("Specify the metadata_type for identifier T2_PUBLISH"). `client.py` turns that
+    into a SystemExit. Before the fix, `_resolve_object` died right there instead of
+    falling through to the typed-candidate loop, so resolving a table BY NAME failed
+    outright even though the same call by GUID worked.
+    """
+    from ts_cli.commands.share import GRANTABLE_TYPES, _resolve_object
+
+    class _Resp:
+        def __init__(self, hits):
+            self._hits = hits
+
+        def json(self):
+            return self._hits
+
+    class _Client:
+        @staticmethod
+        def post(_path, json=None):
+            body = json or {}
+            metadata = (body.get("metadata") or [{}])[0]
+            if "type" not in metadata:
+                raise SystemExit(1)  # the untyped probe's expected 400
+            if metadata["type"] == GRANTABLE_TYPES[0]:
+                return _Resp([{"metadata_id": "tbl-1", "metadata_name": "T2_PUBLISH",
+                              "metadata_type": GRANTABLE_TYPES[0],
+                              "metadata_header": {"id": "tbl-1", "name": "T2_PUBLISH"}}])
+            return _Resp([])
+
+    resolved = _resolve_object(_Client(), "T2_PUBLISH")
+    assert resolved == {"guid": "tbl-1", "name": "T2_PUBLISH",
+                        "type": GRANTABLE_TYPES[0], "subtype": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -299,3 +377,57 @@ def test_assert_org_context_accepts_a_matching_session(monkeypatch):
             return _Resp()
 
     assert share_module.assert_org_context(_Client(), "ORG1", "p") is None
+
+
+# ---------------------------------------------------------------------------
+# ts share resolve -- the Strict Object Mode warning
+# ---------------------------------------------------------------------------
+#
+# Column-level sharing (CLS) only takes effect when the cluster is in Strict Object
+# Mode, and that flag cannot be read through the REST API (parent spec
+# `2026-07-26-ts-security-sharing-design.md` §6, open item #2). `resolve` warns once,
+# to stderr, whenever the resolved plan carries a column-level grant. `--skip-group-check`
+# keeps these tests offline: no client is ever constructed.
+
+def _write_envelope(tmp_path, objects=_OBJECTS):
+    path = tmp_path / "export.json"
+    path.write_text(json.dumps({"objects": objects, "orgs": ["ORG1"], "current_grants": {}}))
+    return str(path)
+
+
+def _resolve_args(input_path, *extra):
+    return ["share", "resolve", "--input", input_path, "--org", "ORG1",
+            "--source", "uniform", "--group", "Analyst", "--share-mode", "READ_ONLY",
+            "--skip-group-check", *extra]
+
+
+def test_resolve_warns_about_strict_object_mode_for_a_column_grant(tmp_path):
+    result = msg_runner.invoke(app, _resolve_args(_write_envelope(tmp_path),
+                                                   "--column", "PROD_NM"))
+    assert result.exit_code == 0, result.output
+    assert "Strict Object Mode" in result.output
+
+
+def test_resolve_does_not_warn_for_an_object_grants_only_plan(tmp_path):
+    result = msg_runner.invoke(app, _resolve_args(_write_envelope(tmp_path)))
+    assert result.exit_code == 0, result.output
+    assert "Strict Object Mode" not in result.output
+
+
+def test_resolve_warns_once_for_several_column_grants(tmp_path):
+    result = msg_runner.invoke(app, _resolve_args(
+        _write_envelope(tmp_path), "--column", "PROD_NM", "--column", "AMOUNT"))
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Strict Object Mode") == 1
+
+
+def test_resolve_column_grant_warning_does_not_change_the_exit_code_or_leak_to_stdout(
+        tmp_path):
+    # `runner`, not `msg_runner`: stdout must stay pure JSON with the warning kept off
+    # it entirely, and the plan a column grant produces must exit the same as any other.
+    result = runner.invoke(app, _resolve_args(_write_envelope(tmp_path),
+                                              "--column", "PROD_NM"))
+    assert result.exit_code == 0, result.output
+    plan = json.loads(result.stdout)
+    assert plan["summary"]["column_grants"] == 1
+    assert "Strict Object Mode" not in result.stdout
