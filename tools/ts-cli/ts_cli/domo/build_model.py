@@ -81,14 +81,26 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
     tables: list[dict] = []
     table_docs: dict[str, dict] = {}
     columns: list[dict] = []
+    # A model cannot expose two columns with the same DISPLAY name, but a name
+    # shared across joined tables (typically the join key, e.g. Customer ID) must
+    # stay physically present on BOTH tables so the join resolves. So on a display
+    # collision we keep the column and disambiguate its display name (appending the
+    # table), leaving db_column_name = the physical name the join references.
+    used_display: set = set()
+    renamed_cols: list[dict] = []
     for ds in app.datasets:
         table_docs[f"{_slug(ds.name)}.table.tml"] = _build_table_doc(
             ds, connection_name, db, schema, type_overrides)
         tables.append({"name": ds.name, "db_table": ds.name})
         for c in ds.columns:
             ts_type = _ts_type(c.domo_type, type_overrides, c.name)
+            display = c.name
+            if display.lower() in used_display:
+                display = f"{c.name} ({ds.name})"
+                renamed_cols.append({"table": ds.name, "from": c.name, "to": display})
+            used_display.add(display.lower())
             columns.append({
-                "name": c.name, "db_column_name": c.name, "table": ds.name,
+                "name": display, "db_column_name": c.name, "table": ds.name,
                 "column_type": _col_type(ts_type),
             })
 
@@ -116,6 +128,26 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
         model_name=model_name, connection_name=connection_name, tables=tables,
         columns=columns, joins=joins, parameters=[], translated_formulas=translated)
 
+    # Two model-join fixes the shared emitter doesn't apply:
+    #  1. A join must declare a cardinality (emitter sets only type).
+    #  2. A join must live on the FK/source (MANY) side ONLY — the emitter emits
+    #     it on both tables (bidirectional), which fails model schema validation.
+    # Derive the MANY side from row counts (larger table = fact = MANY side).
+    rows_by_table = {ds.name: (ds.rows or 0) for ds in app.datasets}
+    for mt in model_tml.get("model", {}).get("model_tables", []):
+        here = rows_by_table.get(mt.get("name"), 0)
+        kept = []
+        for j in mt.get("joins", []):
+            there = rows_by_table.get(j.get("with"), 0)
+            if here >= there:  # this is the MANY side — keep the join here
+                j["cardinality"] = "MANY_TO_ONE"
+                kept.append(j)
+            # else: ONE side — drop; the join belongs on the MANY side entry
+        if kept:
+            mt["joins"] = kept
+        else:
+            mt.pop("joins", None)
+
     invariant_findings: list[str] = []
     for fn, doc in table_docs.items():
         invariant_findings += [f"{fn}: {m}" for m in validate_tml_invariants(doc)]
@@ -130,6 +162,7 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
              "status": "NEEDS REVIEW", "note": "inferred by shared column name"}
             for (a, b, k) in join_notes],
         "beast_modes": mapping_formulas,
+        "renamed_columns": renamed_cols,
         "invariant_findings": invariant_findings,
     }
     counts = {"tables": len(tables), "formulas": len(translated), "joins": len(joins)}

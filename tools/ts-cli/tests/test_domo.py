@@ -48,7 +48,7 @@ def test_build_model_translates_beast_modes(tmp_path):
     by_name = {f["name"]: f for f in mapping["beast_modes"]}
     assert by_name["Net Revenue"]["ts_formula"] == "sum([Revenue]) - sum([Discount])"
     assert by_name["Avg Order Value"]["ts_formula"] == \
-        "sum([Revenue]) / unique_count([Transaction ID])"
+        "sum([Revenue]) / unique count([Transaction ID])"
     assert all(f["status"] == "Migrated" for f in mapping["beast_modes"])
 
 

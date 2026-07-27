@@ -47,8 +47,11 @@ def translate(expr: str) -> tuple[str, bool, str]:
 
     # 1. column refs: `Col Name` -> [Col Name]
     out = _BACKTICK.sub(lambda m: f"[{m.group(1)}]", expr)
-    # 2. COUNT(DISTINCT [x]) -> unique_count([x])
-    out = _COUNT_DISTINCT.sub(lambda m: f"unique_count({m.group(1)})", out)
+    # 2. COUNT(DISTINCT [x]) -> unique count([x])
+    #    ThoughtSpot's distinct-count formula function is `unique count` (a space,
+    #    NOT an underscore); `unique_count`/`count_distinct` are rejected by the
+    #    formula parser.
+    out = _COUNT_DISTINCT.sub(lambda m: f"unique count({m.group(1)})", out)
 
     # 3. function-name remap (Domo -> ThoughtSpot); flag unknown / unsupported
     def _repl(m: re.Match) -> str:

@@ -6,6 +6,7 @@ emitter exists in this codebase, so the Answer/Liveboard TML is hand-built here
 """
 from __future__ import annotations
 
+import uuid
 from typing import Optional
 
 from .ir import Card, DomoApp
@@ -23,23 +24,24 @@ def _slug(s: str) -> str:
 
 
 def _answer(card: Card, model_name: str, model_fqn: Optional[str]) -> tuple[dict, bool, str]:
-    # answer columns = group-by attributes then query columns (deduped, page order)
-    ordered: list[str] = []
+    # Attributes (group-by) first, then measure columns — page order, deduped.
+    attrs: list[str] = []
+    measures: list[str] = []
     seen: set = set()
     for g in card.query.group_by:
         if g and g not in seen:
             seen.add(g)
-            ordered.append(g)
+            attrs.append(g)
     for c in card.query.columns:
         if c.column and c.column not in seen:
             seen.add(c.column)
-            ordered.append(c.column)
+            (attrs if c.column in card.query.group_by else measures).append(c.column)
+    ordered = attrs + measures
 
     ctype = card.chart_type.lower()
     parts = [f"[{c}]" for c in ordered]
     if card.query.limit and ctype != "kpi":
         parts.append(f"top {card.query.limit}")
-    search_query = " ".join(parts)
 
     table_ref = {"id": model_name, "name": model_name}
     if model_fqn:
@@ -48,8 +50,15 @@ def _answer(card: Card, model_name: str, model_fqn: Optional[str]) -> tuple[dict
     answer: dict = {
         "name": card.title or "Untitled",
         "tables": [table_ref],
-        "search_query": search_query,
+        "search_query": " ".join(parts),
         "answer_columns": [{"name": c} for c in ordered],
+        # The `table` block is required on every viz, chart or not.
+        "table": {
+            "table_columns": [{"column_id": c, "show_headline": False} for c in ordered],
+            "ordered_column_ids": ordered,
+            "client_state": "",
+            "client_state_v2": '{"tableVizPropVersion": "V1"}',
+        },
     }
 
     review = False
@@ -57,14 +66,24 @@ def _answer(card: Card, model_name: str, model_fqn: Optional[str]) -> tuple[dict
     if ctype == "table":
         answer["display_mode"] = "TABLE_MODE"
     elif ctype in _CHART_MAP:
+        # A chart needs chart_columns + axis_configs (x=attributes, y=measures);
+        # an empty/absent axis is what triggers the importer's "Index: 0" error.
         answer["display_mode"] = "CHART_MODE"
-        answer["chart"] = {"type": _CHART_MAP[ctype]}
+        answer["chart"] = {
+            "type": _CHART_MAP[ctype],
+            "chart_columns": [{"column_id": c} for c in ordered],
+            "axis_configs": [{"x": attrs, "y": measures}],
+            "client_state": "",
+        }
     else:
-        # Unknown chart type -> fall back to a table and flag it.
         answer["display_mode"] = "TABLE_MODE"
         review = True
         reason = f"unmapped Domo chartType '{card.chart_type}' — rendered as table"
     return answer, review, reason
+
+
+def _viz_guid() -> str:
+    return str(uuid.uuid4())
 
 
 def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
@@ -89,7 +108,7 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
         idx += 1
         ans, review, reason = _answer(card, model_name, model_fqn)
         vid = f"Viz_{idx}"
-        vizzes.append({"id": vid, "answer": ans})
+        vizzes.append({"id": vid, "answer": ans, "viz_guid": _viz_guid()})
         w = max(card.pref_width or 6, 3)
         h = max(card.pref_height or 4, 2)
         if x + w > 12:

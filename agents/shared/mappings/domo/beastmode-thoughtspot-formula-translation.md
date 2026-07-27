@@ -37,7 +37,7 @@ Used both as a card column `aggregation` and inside Beast Mode formulas.
 | `MIN` | `min` | Migrated | |
 | `MAX` | `max` | Migrated | |
 | `COUNT` | `count` | Migrated | |
-| `COUNT(DISTINCT x)` | `unique_count(x)` | Migrated | distinct-count idiom |
+| `COUNT(DISTINCT x)` | `unique count(x)` | Migrated | distinct-count idiom (TS: `unique count`, a space not underscore) |
 | `MEDIAN` | — | NEEDS REVIEW | no clean TML aggregation keyword |
 | `STDDEV` / `VARIANCE` | `stddev` / `variance` | Approximated | verify sample vs population |
 
@@ -65,7 +65,7 @@ wrong-but-valid substitute.
 | Beast Mode (Domo) | ThoughtSpot formula | Status |
 |---|---|---|
 | `SUM(\`Revenue\`) - SUM(\`Discount\`)` | `sum([Revenue]) - sum([Discount])` | Migrated |
-| `SUM(\`Revenue\`) / COUNT(DISTINCT \`Transaction ID\`)` | `sum([Revenue]) / unique_count([Transaction ID])` | Migrated |
+| `SUM(\`Revenue\`) / COUNT(DISTINCT \`Transaction ID\`)` | `sum([Revenue]) / unique count([Transaction ID])` | Migrated |
 | `(SUM(\`Discount\`) / SUM(\`Revenue\`)) * 100` | `(sum([Discount]) / sum([Revenue])) * 100` | Migrated |
 
 Formulas become `[formula_<name>]` id-referenced Model formulas so they import in a single pass
