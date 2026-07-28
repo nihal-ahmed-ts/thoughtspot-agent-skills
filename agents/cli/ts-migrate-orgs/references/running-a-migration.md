@@ -167,6 +167,40 @@ Use `/ts-object-model-alias` with `build --merge`, once per wave, serialised.
 **Before merging, confirm the export returned the aliases of every already-cut-over
 tenant.** A partial export silently drops them.
 
+### Alias scoping — three things that will bite you
+
+**Org-wide aliases use `group: TS_WILDCARD_ALL`.** That is what a tenant migration wants:
+every user in the Org sees their own column names.
+
+**An ambiguous alias resolves to the BASE column name.** Verified by live experiment,
+four cases on four columns, checked as a real non-admin user:
+
+| Column | Scopes | Rendered |
+|---|---|---|
+| `STRING_1` | wildcard only | `A_wildcard_only` |
+| `STRING_2` | wildcard + group, **different** aliases | **`STRING_2`** — base name |
+| `STRING_3` | wildcard + group, **identical** aliases | **`STRING_3`** — base name |
+| `STRING_4` | group only | `D_group_only` |
+
+So a group scope does **not** override a wildcard, and identical values do not save you.
+Every entry stays individually valid, the import returns `OK`, and the export looks right —
+the only symptom is tenants seeing generic names.
+
+**Mixed strategies across *different* columns are fine.** Wildcard on some, group scopes on
+others is legitimate; the rule bites only on one column carrying both.
+
+> **Verify in Search Data, an Answer, a Liveboard or Spotter — nowhere else.** Aliases are
+> **not** rendered in the Data Management app (an open development item as of 2026-07-28),
+> and `metadata/answer/data` returns base names too. Checking either shows base names for
+> *everything* and looks like total failure.
+
+**An empty group is rejected** with `Group with name not found in org`. Do not substitute an
+arbitrary real group to get past it — that is precisely how the overlap above gets created.
+
+**`--merge` cannot remove an entry.** Correcting a wrong scope needs a full non-merge
+rebuild, which **silently drops anything absent from your input**. Inventory what exists
+before replacing.
+
 ### Step 8 — Verify, then cut over
 
 Verify **as a real non-admin user in the target Org**. An admin bypasses RLS and sees
