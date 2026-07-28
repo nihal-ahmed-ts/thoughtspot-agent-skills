@@ -98,14 +98,15 @@ guessing.
 ### Step 1 — Build the model
 ```bash
 ts domo build-model --input <bundle-dir> --connection "<TS connection>" \
-  --database <DATABASE> --schema <SCHEMA> --model-name "<Model name>" --out out/ \
-  [--overrides overrides.json]
+  --database <DATABASE> --schema <SCHEMA> --model-name "<Model name>" --output-dir out/ \
+  [--etl <magic_etl_export.json>]
 ```
 Emits Table TML(s) + Model TML + `mapping.json`. Dataset columns map by the type table
 (`STRING→VARCHAR` attr, `DOUBLE/LONG→MEASURE`, …). Beast Modes become `[formula_<name>]`
-id-referenced formulas (single-pass import). **Joins are not in Domo metadata** — inferred by
-shared column name (e.g. `Customer ID`) or taken from `--overrides`, and every inferred join is
-flagged `NEEDS REVIEW`. Read `mapping.json`.
+id-referenced formulas (single-pass import). **Joins:** if a **Magic ETL export** is supplied
+via `--etl`, joins come from the dataflow's `MergeJoin` graph (keys + type) — the accurate
+source; otherwise they're inferred by shared column name. Either way each join is flagged
+`NEEDS REVIEW` (side/cardinality is inferred without full column lineage). Read `mapping.json`.
 
 ### Step 2 — Validate & import the model
 ```bash
@@ -144,5 +145,6 @@ rebuild.
 
 | Version | Date | Summary |
 |---|---|---|
+| 0.3.0 | (magic-etl + live probe) | `build-model --etl` derives model joins from a Domo Magic ETL export (`magic_etl.parse_etl`). Added `client.py` (internal-API client) as a live-path foundation; probe confirmed datasets/pages/chartType/Beast-Modes are reachable but the card **analyzer query is not** — full card fidelity stays offline (see open-items). |
 | 0.2.0 | (offline build) | `ts domo` CLI implemented for **offline** mode — parse / build-model / build-liveboard, Beast Mode translation, join inference, tests green. Live `domo-cloud` client still pending. |
 | 0.1.0 | (scaffold) | Skill structure, IR contract, Beast Mode mapping, fixtures — CLI impl pending |
