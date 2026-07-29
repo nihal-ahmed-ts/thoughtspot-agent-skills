@@ -616,6 +616,32 @@ ts tml lint --file model.tml && ts tml import --file model.tml --policy ALL_OR_N
 
 ---
 
+### `ts tml verify-render <liveboard>`
+
+Verify an imported Liveboard actually **renders**, not merely that it imported. A
+hand-authored or subtly mis-bound answer can import cleanly (valid TML, resolvable column
+names) yet fail at query time with `No data source found for the query` — the tile shows
+blank/broken in the UI while `ts tml import` reported success. This calls
+`metadata/liveboard/data` for the board; on failure it re-probes each tile so the
+offending visualization is named, not just a board-level 500.
+
+```bash
+ts tml verify-render <liveboard-guid> --profile myprofile
+ts tml verify-render <liveboard-guid> --profile myprofile --org 1417628299
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `liveboard` (arg) | required | GUID or name of the imported Liveboard |
+| `--profile`, `-p` | first profile | Profile to use |
+| `--org` | profile/env org | Org id or name the Liveboard lives in |
+
+**Output:** JSON `{"ok", "board", "tiles_rendered", "error", "failing_tiles": [{visual, error}]}`.
+**Exit code** is `0` if the board renders, `1` otherwise — so a conversion skill can gate its
+import step on it (`ts tml import ... && ts tml verify-render <guid>`).
+
+---
+
 ### `ts dependency mutate` / `backup` / `rollback` / `apply-change`
 
 BL-083: codifies the `ts-dependency-manager` skill's safety-critical REMOVE/REPOINT
@@ -2729,7 +2755,7 @@ with spaces/special chars like `Order Date` 1:1) + batched `INSERT`.
 > limitation), so the new table must be **selected in the ThoughtSpot connection editor (UI)**
 > before `ts tables create` / model build can reference it.
 
-### `ts powerbi parse` / `build-model` / `build-liveboard`
+### `ts powerbi parse` / `build-model` / `build-liveboard` / `build-timeintel`
 
 The Power BI (`.pbip`) to ThoughtSpot converter for the `ts-convert-from-powerbi` skill.
 Mirrors the Tableau converter: `parse` reads the project into structured JSON, `build-model`
@@ -2816,6 +2842,38 @@ Stdout: JSON counts (`report_name`, `answers`, `tabs`, `visuals_migrated`,
 `approximated`, `needs_review`, `liveboard`). A chart type with no faithful ThoughtSpot
 equivalent is emitted as its nearest approximation and flagged `Approximated` or
 `NEEDS REVIEW`, matching the Tableau path's "flag, never downgrade" contract.
+
+#### `ts powerbi build-timeintel`
+
+Rebuild flagged SAMEPERIODLASTYEAR / YoY measures as **Reference-Date `sum_if` measures** — the
+one time-intelligence pattern verified live (`worked-examples/powerbi/sply-parameter.md`). Power
+BI time-intelligence has no 1:1 ThoughtSpot formula, so `build-model` flags those measures NEEDS
+REVIEW; this emits a `Reference Date` parameter plus, per base measure, a reference-year / SPLY /
+YoY / YoY% formula. It is **measure-based**, so the liveboard tiles that reference them render —
+unlike a hand-authored period-comparison tile, whose resolved column structure fails at render
+with "No data source found". Run it in Step 3 (before the liveboard), re-import, then verify the
+numbers against the source. It never invents numbers.
+
+```bash
+ts powerbi build-timeintel --specs timeintel.json --date-column "Date" --model out/my.model.tml
+```
+
+`timeintel.json`:
+```json
+[{"base_name": "New Hires", "base_expr": "[formula_isNewHire]",
+  "sply_name": "New Hires SPLY", "yoy_name": "New Hires YoY", "yoy_pct_name": "New Hires YoY %"}]
+```
+
+| Flag | Required | Description |
+|---|---|---|
+| `--specs` | yes | JSON list of `{base_name, base_expr, [sply_name, yoy_name, yoy_pct_name]}`. `base_expr` is the base measure's row-level body (from `mapping.json`) |
+| `--date-column` | yes | Model date column the year-offset compares against |
+| `--model` | no | Model TML to merge the parameter + measures into (writes back). Omit to print the fragment for manual merge |
+| `--ref-date` | no | `Reference Date` parameter default, `MM/DD/YYYY` (default `12/31/2024`) |
+
+Stdout: JSON `{measures_emitted, parameter, formulas, columns, model_updated, review}`. `review`
+lists one human-verify note per emitted comparison set (and any spec skipped for a missing
+`base_expr`, never guessed).
 
 ---
 

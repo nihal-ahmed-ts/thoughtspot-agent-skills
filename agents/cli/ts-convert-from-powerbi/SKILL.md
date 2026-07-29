@@ -42,6 +42,17 @@ Ask one question at a time for **dependent** decisions (where the next depends o
   existing physical tables; it does not load data. For a demo, `ts load databricks` can
   provision synthetic tables aligned to the model.
 
+## Core rule — tiles come from the tool, never by hand
+
+Every Answer/Liveboard tile is produced by `ts powerbi build-liveboard`. **Never hand-author
+answer or liveboard TML, and never hand-edit a tile's `search_query`, `answer_columns`, or
+chart block.** A hand-authored tile that references a raw column (e.g. `[Month]` instead of the
+`Month(Date)` bucket) or omits its axis config imports cleanly but fails at render with
+*"No data source found for the query"* — the board looks done and shows blank tiles. If a tile
+needs a measure that is not in the model yet, the fix is to add that measure to the **model**
+(Step 3) and re-run `build-liveboard` — not to draw the tile by hand. Step 4 gates on
+`ts tml verify-render`, so a board that does not actually render can never be handed over.
+
 ## Workflow
 
 ### Step 0 — Parse
@@ -73,25 +84,48 @@ ts tml import out/*.table.tml out/*.model.tml --profile <name>
 If the engine rejects a formula, drop it (and any column that depends on it) and re-import —
 what lands is guaranteed to work, and the report records what was pruned.
 
-### Step 3 — Build & import the liveboard
+### Step 3 — Resolve the hard tail INTO the model (before the liveboard)
+The liveboard tiles reference these measures, so they must exist in the model **first**.
+Building the liveboard against a model still missing them is exactly what produces blank,
+non-rendering tiles — resolve them here, re-import (Step 2), and only then build the liveboard.
+
+- **`CALCULATE(m, ALL(dims))`** → `group_aggregate` (worked example) — already emitted by Step 1.
+- **SAMEPERIODLASTYEAR / YoY** are flagged NEEDS REVIEW, never faked. Rebuild them
+  deterministically with `ts powerbi build-timeintel` — it emits a `Reference Date` parameter
+  plus `sum_if` reference-year / SPLY / YoY / YoY% measures (the pattern verified live; it is
+  **measure-based**, so the tiles that reference them render — a hand-authored period-comparison
+  tile does not) and merges them into the model TML:
+  ```bash
+  ts powerbi build-timeintel --specs timeintel.json --date-column "<Date column>" \
+    --model out/*.model.tml
+  ```
+  `timeintel.json` is `[{"base_name": "New Hires", "base_expr": "[formula_isNewHire]"}, ...]`,
+  where `base_expr` is the base measure's row-level body (from `mapping.json`); add
+  `sply_name` / `yoy_name` / `yoy_pct_name` to match the source measure names so the author's own
+  `YoY % Change` measures cascade through the id-references. **Verify the per-period numbers
+  against the Power BI source before adopting** — the helper never invents numbers. For a
+  one-off exploratory answer, `ts spotter answer` drafts the native `vs` period comparison.
+- Re-import the model (Step 2). Do **not** proceed to the liveboard until every measure a tile
+  will reference exists in the model.
+
+### Step 4 — Build, import & VERIFY the liveboard
 ```bash
 ts powerbi build-liveboard <path-to-.pbip> --model-name "<Model name>" --output out/
 ts tml import out/*.liveboard.tml --profile <name>
+ts tml verify-render <liveboard-guid> --profile <name>   # REQUIRED gate; exit 1 = broken board
 ```
-Report pages become tabs (PBI `pageOrder` preserved); a Tooltip page is dropped, not a tab.
-Role-aware axes: Category → x, Series/Legend → color, matrix Rows/Columns → pivot axes,
-measures → y. A month column becomes a monthly date bucket so it sorts chronologically.
-
-### Step 4 — Time-intelligence and the hard tail
-SAMEPERIODLASTYEAR / YoY have no 1:1 DAX→formula path — rebuild them with a **Reference Date
-parameter** (see the worked example). `CALCULATE(m, ALL(dims))` is auto-translated to
-`group_aggregate` (worked example). For an expressible flagged measure, `ts spotter answer`
-can draft it from plain English; **verify the numbers on the cluster before adopting** — never
-auto-adopt a Spotter answer.
+`build-liveboard` emits renderable tiles: report pages become tabs (PBI `pageOrder`; a Tooltip
+page is dropped), role-aware axes (Category → x, Series/Legend → color, matrix Rows/Columns →
+pivot, measures → y), a month column becomes a monthly date bucket (`Month(Date)`), and every
+chart carries its axis config. **`ts tml verify-render` is a required gate, not optional.** If
+it reports `ok:false` it names the failing tile(s); the cause is almost always a tile
+referencing a measure not in the model (return to Step 3) or a hand-edited tile. Fix the model
+or re-run `build-liveboard` — never hand-edit the tile TML to silence the error.
 
 ### Step 5 — Migration report
 `mapping.json` accounts for every table, measure, and visual with a status (Migrated /
-Approximated / NEEDS REVIEW / Skipped). Hand it to the user as the deliverable.
+Approximated / NEEDS REVIEW / Skipped). Note whether `verify-render` passed. Hand it to the
+user as the deliverable.
 
 ---
 
@@ -99,4 +133,5 @@ Approximated / NEEDS REVIEW / Skipped). Hand it to the user as the deliverable.
 
 | Version | Date | Summary |
 |---|---|---|
+| 1.1.0 | 2026-07-27 | Render-robustness: require `ts tml verify-render` as a gate after import; resolve the time-intelligence hard tail INTO the model before building the liveboard, via the new deterministic `ts powerbi build-timeintel` (Reference-Date SPLY/YoY measures, the live-verified measure-based pattern); add the "tiles come from the tool, never by hand" core rule (a hand-authored tile imports but fails to render with "No data source found") |
 | 1.0.0 | 2026-07-16 | Initial release — `ts powerbi` parse / build-model / build-liveboard |

@@ -125,6 +125,7 @@ are roughly ordered by value÷effort.
 | BL-111 | `--connection` filter: converter rewiring (remaining) | — |
 | BL-112 | Rewire smoke_ts_audit.py onto `ts audit run/report` | — |
 | BL-116 | Live destructive dependency-manager smoke | — |
+| BL-171 | Bound `ts tml verify-render` per-tile probing on large liveboards | opportunistic |
 | ~~BL-132~~ | ~~from-Databricks build-model: duplicate `column_id` → formula promotion (I8/I5 parity with from-Snowflake)~~ | DONE (PR #332) |
 | ~~BL-133~~ | ~~`ts metadata delete`: partial-success handling (batch fails atomically if one GUID is missing)~~ | DONE (PR #333, #335) |
 
@@ -5371,3 +5372,22 @@ first would have mixed an unbounded triage into a scoped fix.
 skips 82% of its current input would inherit the same blind spot.
 
 **Target:** next validator pass; before BL-171's validator extension.
+
+---
+
+## BL-173 — Bound `ts tml verify-render` per-tile probing on large liveboards `Tier 3`
+
+Raised by djwaldo reviewing #356 (the Power BI render-robustness PR). When a board fails the
+whole-board `metadata/liveboard/data` call, `verify-render` re-probes **each tile sequentially**
+with a 180s timeout to name the offending visualization. On a board with 20+ tiles this is
+sequential and unbounded.
+
+**Why it is low priority (reviewer's call, agreed):** it is the error path only — a board that
+already failed the whole-board render — and the per-tile 500s return fast in practice, so the
+realistic wall time is small. The current behaviour is correct, just not bounded.
+
+**Approach when picked up:** cap the work — either probe tiles concurrently (a small pool) or
+early-bail after N failing tiles (the board is already known broken; naming the first few is
+enough to act), keeping the full per-tile list only under the cap. Pure change in
+`ts_cli/render_check.py` + the loop in `commands/tml.py verify_render_cmd`; add a test asserting
+the cap. Target: opportunistic — next time a real liveboard with 20+ tiles goes through the gate.
