@@ -41,24 +41,42 @@ Used both as a card column `aggregation` and inside Beast Mode formulas.
 | `MEDIAN` | — | NEEDS REVIEW | no clean TML aggregation keyword |
 | `STDDEV` / `VARIANCE` | `stddev` / `variance` | Approximated | verify sample vs population |
 
-## Functions (`FUNCTION_MAP`) — deterministic subset
+## Functions (`FUNCTION_MAP`) — deterministic 1:1 name maps (Migrated)
 
-| Domo Beast Mode | ThoughtSpot | Status | Notes |
-|---|---|---|---|
-| `CASE WHEN … THEN … ELSE … END` | `if (…) then … else …` | Approximated | multi-branch → nested `if` |
-| `IFNULL(a,b)` / `COALESCE` | `if (isnull(a)) then b else a` | Migrated | |
-| `CONCAT(a,b)` | `concat(a, b)` | Migrated | |
-| `UPPER` / `LOWER` | `upper` / `lower` | Migrated | |
-| `ABS` / `ROUND` / `FLOOR` / `CEIL` | `abs` / `round` / `floor` / `ceil` | Migrated | |
-| `DATEDIFF(a,b)` | `diff_days(a, b)` | Approximated | confirm arg order & unit |
-| `YEAR`/`MONTH`/`DAY` | `year`/`month`/`day` | Migrated | |
+Function names are token-rewritten; arguments pass through unchanged.
 
-## Unsupported → NEEDS REVIEW (`UNSUPPORTED`)
+**Math** — `ABS`→`abs`, `ROUND`→`round`, `FLOOR`→`floor`, `CEIL`/`CEILING`→`ceil`,
+`POWER`/`POW`→`pow`, `SQRT`→`sqrt`, `EXP`→`exp`, `LN`→`ln`, `LOG`→`log`, `MOD`→`mod`, `SIGN`→`sign`.
 
-Window/running functions (`RANK`, `LAG`, `LEAD`, running totals), fixed-function / level-of-detail
-patterns, `POWER`-user date-part arithmetic Domo resolves server-side, and any function with no
-ThoughtSpot equivalent. Emitted verbatim with a `NEEDS REVIEW` note — never downgraded to a
-wrong-but-valid substitute.
+**String** — `CONCAT`→`concat`, `UPPER`→`upper`, `LOWER`→`lower`, `TRIM`→`trim`, `LTRIM`→`ltrim`,
+`RTRIM`→`rtrim`, `LENGTH`/`LEN`→`strlen`, `SUBSTRING`/`SUBSTR`→`substring`, `REPLACE`→`replace`,
+`LEFT`→`left`, `RIGHT`→`right`, `INSTR`→`strpos`.
+
+**Date** — `YEAR`→`year`, `MONTH`→`month`, `DAY`→`day`, `HOUR`→`hour`, `MINUTE`→`minute`,
+`QUARTER`→`quarter`, `WEEK`→`week`, `NOW`→`now`, `CURRENT_DATE`→`today`.
+
+**Type** — `TO_NUMBER`→`to_double`, `TO_CHAR`/`TO_STRING`→`to_string`, `TO_DATE`→`to_date`.
+
+## Approximated (translated, verify)
+
+| Domo Beast Mode | ThoughtSpot | Notes |
+|---|---|---|
+| `DATEDIFF(a,b)` / `DATE_DIFF` | `diff_days(a, b)` | verify arg order & unit — Domo may return b−a; TS `diff_days(a,b)` = a−b. For elapsed delivery time use `diff_days(delivered, purchase)`. |
+| `STDDEV` / `VARIANCE` | `stddev` / `variance` | verify sample vs population |
+
+## Structural / unsupported → NEEDS REVIEW
+
+Emitted **verbatim** with a NEEDS REVIEW note — the token translator can't faithfully rewrite these,
+so a human confirms the ThoughtSpot form (never a wrong-but-valid substitute):
+
+| Domo Beast Mode | Recommended ThoughtSpot rewrite |
+|---|---|
+| `CASE WHEN c THEN x ELSE y END` | `if (c) then x else y` (nest for multi-branch) |
+| `IFNULL(a,b)` / `COALESCE(a,b)` | `if (isnull(a)) then b else a` |
+| `NULLIF(a,b)` | `if (a = b) then null else a` |
+| `CAST(x AS t)` | `to_double` / `to_string` / `to_date` per target type |
+| `RANK` / `ROW_NUMBER` / `LAG` / `LEAD` / running totals / `… OVER (PARTITION BY …)` | `rank` / window / `group_aggregate` — depends on intent, rebuild manually |
+| `MEDIAN` / `PERCENTILE` | no clean TML keyword — rebuild manually |
 
 ## Worked examples (from the fixture Beast Modes)
 

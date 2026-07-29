@@ -12,23 +12,43 @@ import re
 # Domo Beast Mode function/aggregation name -> ThoughtSpot function.
 # None = no ThoughtSpot equivalent -> flag NEEDS REVIEW.
 FUNCTION_MAP: dict[str, str | None] = {
+    # --- aggregations ---
     "sum": "sum", "avg": "average", "average": "average", "min": "min", "max": "max",
-    "count": "count",
-    "abs": "abs", "round": "round", "floor": "floor", "ceil": "ceil", "ceiling": "ceil",
-    "sqrt": "sqrt", "power": "pow", "pow": "pow",
-    "concat": "concat", "upper": "upper", "lower": "lower", "trim": "trim",
-    "coalesce": "coalesce", "ifnull": "coalesce",
-    "year": "year", "month": "month", "day": "day",
-    # Unsupported / non-deterministic -> flag for review:
-    "rank": None, "row_number": None, "lag": None, "lead": None,
+    "count": "count", "stddev": "stddev", "stdev": "stddev",
+    "variance": "variance", "var": "variance",
     "median": None, "percentile": None,
+    # --- math ---
+    "abs": "abs", "round": "round", "floor": "floor", "ceil": "ceil", "ceiling": "ceil",
+    "power": "pow", "pow": "pow", "sqrt": "sqrt", "exp": "exp", "ln": "ln", "log": "log",
+    "mod": "mod", "sign": "sign",
+    # --- string ---
+    "concat": "concat", "upper": "upper", "lower": "lower", "trim": "trim",
+    "ltrim": "ltrim", "rtrim": "rtrim", "length": "strlen", "len": "strlen",
+    "substring": "substring", "substr": "substring", "replace": "replace",
+    "left": "left", "right": "right", "instr": "strpos",
+    # --- date ---
+    "year": "year", "month": "month", "day": "day", "hour": "hour", "minute": "minute",
+    "quarter": "quarter", "week": "week", "now": "now", "current_date": "today",
+    "datediff": "diff_days", "date_diff": "diff_days",
+    # --- type ---
+    "to_number": "to_double", "to_double": "to_double", "to_char": "to_string",
+    "to_string": "to_string", "to_date": "to_date",
+    # --- structural / unsupported -> NEEDS REVIEW (manual rewrite; see the
+    #     mapping doc for the recommended ThoughtSpot form) ---
+    "ifnull": None, "coalesce": None, "nullif": None, "cast": None,
+    "rank": None, "row_number": None, "lag": None, "lead": None, "running_total": None,
 }
 
 # ThoughtSpot function names we emit ourselves — must not be flagged as "unknown"
 # when the token pass re-scans the translated string.
 _KNOWN_TS = {v for v in FUNCTION_MAP.values() if v} | {
-    "unique_count", "if", "isnull", "to_string", "to_double",
+    "unique_count", "unique", "if", "isnull", "to_string", "to_double",
+    "diff_hours", "diff_minutes", "add_days", "add_months",
 }
+
+# Constructs the token-based translator cannot faithfully rewrite -> flag NEEDS REVIEW.
+_UNSUPPORTED_RE = re.compile(
+    r"\bcase\s+when\b|\bover\s*\(|\bpartition\s+by\b", re.IGNORECASE)
 
 _BACKTICK = re.compile(r"`([^`]+)`")
 # COUNT(DISTINCT [col]) -> unique_count([col])  (runs after backtick->bracket)
@@ -44,6 +64,11 @@ def translate(expr: str) -> tuple[str, bool, str]:
 
     reasons: list[str] = []
     review = False
+
+    # 0. structural constructs the token translator can't faithfully rewrite
+    #    (multi-branch CASE, window/OVER) -> emit verbatim, flag for manual rewrite.
+    if _UNSUPPORTED_RE.search(expr):
+        return expr, True, "contains CASE WHEN / window construct — manual rewrite required"
 
     # 1. column refs: `Col Name` -> [Col Name]
     out = _BACKTICK.sub(lambda m: f"[{m.group(1)}]", expr)

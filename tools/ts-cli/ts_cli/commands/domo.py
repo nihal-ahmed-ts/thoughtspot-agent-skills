@@ -67,6 +67,27 @@ def build_model_cmd(
     print(json.dumps({"counts": arts["counts"], "model": arts["model"]["filename"]}, indent=2))
 
 
+@app.command("report")
+def report_cmd(
+    output_dir: str = typer.Option("out", "--output-dir", "-o",
+        help="Dir holding mapping.json (+ liveboard_mapping.json) from build-model/build-liveboard"),
+    output_file: Optional[str] = typer.Option(None, "--output",
+        help="Report path (default: <output-dir>/migration_report.md)"),
+) -> None:
+    """Render a Markdown migration report from the build mappings."""
+    from ts_cli.domo.report import render_report
+
+    out = Path(output_dir)
+    mapping = json.loads((out / "mapping.json").read_text())
+    lb_path = out / "liveboard_mapping.json"
+    lb = json.loads(lb_path.read_text()) if lb_path.exists() else None
+    md = render_report(mapping, lb)
+    dest = Path(output_file) if output_file else (out / "migration_report.md")
+    dest.write_text(md)
+    typer.echo(f"Migration report → {dest}", err=True)
+    print(str(dest))
+
+
 @app.command("build-liveboard")
 def build_liveboard_cmd(
     input_dir: str = typer.Argument(..., help="Directory of exported Domo JSON"),
