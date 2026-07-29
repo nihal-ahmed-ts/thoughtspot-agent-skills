@@ -1,29 +1,61 @@
 # Domo → ThoughtSpot Migration Report
 
 **App:** Sales Overview  
-**Source mode:** offline
+**Source mode:** offline  
+**Provenance:** data model = **SOURCE** (Domo dataset schemas) · charts = **INFERRED** from the dashboard PDF (verify)
 
-## Summary
+## Executive summary
 
-| Object type | Count | Migrated | Approximated | NEEDS REVIEW |
-|---|---|---|---|---|
-| Datasets → Tables | 2 | 2 | 0 | 0 |
-| Joins | 1 | 0 | 0 | 1 |
-| Beast Modes → Formulas | 3 | 3 | 0 | 0 |
-| Cards → Answers | 3 | 3 | 0 | 0 |
+- **Migration complexity:** Low–Medium
+- **Automation %:** 89%  |  **Manual %:** 11%
+- **Estimated effort:** ~0.5–1 engineer-day
+- **Risk score:** Low–Medium — 1 item(s) flagged NEEDS REVIEW.
 
-## ⚠️ Needs review
+## Inventory
 
-- **Join** Customer Master ↔ Sample Sales Transactions on `Customer ID` — inferred by shared column name
+- **Tables:** 2  |  **Columns:** 16
+- **Relationships:** 1  |  **Measures (Beast Modes):** 3
+- **Pages:** 1  |  **Visuals:** 3
 
-## Datasets → Tables
+## Modernization
+
+**Dashboards eliminated:** none — the 1 Domo page(s) map to 1 Liveboard(s).
+
+**Search opportunities:** the 1 KPI card(s) are re-askable on demand via Search; kept as tiles for the overview band.
+
+**Spotter opportunities:** stand up Spotter on the model for conversational "explain <measure> by <dimension>" breakdowns that replace static charts.
+
+**Semantic improvements:**
+- Promoted 3 Domo Beast Mode(s) to reusable model measures.
+- Disambiguated 1 display-name collision(s); join keys stay physically present on both tables so joins resolve.
+- Confirm each join is MANY_TO_ONE from the fact so additive measures do not fan out across the star.
+
+## Summary by object type
+
+| Object type | In Domo | Migrated | Approximated | Needs review | Skipped |
+|---|---|---|---|---|---|
+| Datasets → Tables | 2 | 2 | 0 | 0 | 0 |
+| Joins | 1 | 0 | 0 | 1 | 0 |
+| Beast Modes → Formulas | 3 | 3 | 0 | 0 | 0 |
+| Cards → Answers | 3 | 3 | 0 | 0 | 0 |
+| Pages → Liveboards | 1 | 1 | 0 | 0 | 0 |
+
+## Data model
+
+### Tables
 
 | Domo dataset | ThoughtSpot table | Columns | Status |
 |---|---|---|---|
 | Customer Master | Customer Master | 6 | Migrated |
 | Sample Sales Transactions | Sample Sales Transactions | 10 | Migrated |
 
-## Beast Modes → Formulas
+### Relationships → joins
+
+| Relationship | On | Status | Note |
+|---|---|---|---|
+| Customer Master ↔ Sample Sales Transactions | `Customer ID` | NEEDS REVIEW | inferred by shared column name |
+
+### Beast Modes → Formulas
 
 | Name | Domo formula | ThoughtSpot formula | Status |
 |---|---|---|---|
@@ -31,16 +63,36 @@
 | Avg Order Value | `SUM(`Revenue`) / COUNT(DISTINCT `Transaction ID`)` | `sum([Revenue]) / unique count([Transaction ID])` | Migrated |
 | Discount Rate % | `(SUM(`Discount`) / SUM(`Revenue`)) * 100` | `(sum([Discount]) / sum([Revenue])) * 100` | Migrated |
 
-## Cards → Answers
+## Cards → answers & liveboard
 
-| Card | Chart type | Status |
-|---|---|---|
-| Net Revenue | kpi | Migrated |
-| Revenue by Region | bar | Migrated |
-| Sales Rep Performance | table | Migrated |
+| Card | ThoughtSpot chart | Status | Note |
+|---|---|---|---|
+| Net Revenue | KPI | Migrated |  |
+| Revenue by Region | BAR | Migrated |  |
+| Sales Rep Performance | TABLE | Migrated |  |
 
 Assembled onto Liveboard **Sales Overview** (3 tiles).
 
-## Renamed columns (display-name collisions)
+### Renamed columns (display-name collisions)
 
 - `Customer ID` → `Customer ID (Sample Sales Transactions)` (table Sample Sales Transactions)
+
+## Manual review (do these in ThoughtSpot)
+
+- **Join** Customer Master ↔ Sample Sales Transactions on `Customer ID` (NEEDS REVIEW) — inferred by shared column name. Confirm MANY_TO_ONE from the fact.
+
+## Verification checklist
+
+- Pick one known total in Domo and confirm the identical number in ThoughtSpot (via Search / searchdata).
+- Slice a measure by a dimension across each join and confirm it does not fan out (validates the join cardinality).
+- Confirm any source filters became Liveboard filters and slice every tile.
+
+## ThoughtSpot Modernization Scorecard
+
+| Category | Score | Recommendation |
+|---|---|---|
+| Semantic Model | 80/100 | Confirm MANY_TO_ONE cardinalities to lock the grain. |
+| Search Readiness | 90/100 | Friendly names + reusable measures in place. |
+| Spotter Readiness | 85/100 | Stand up Spotter on the model to replace static breakdown charts. |
+| Liveboards | 90/100 | 1 page(s) → 1 Liveboard(s). |
+| AI Readiness | 80/100 | Add a Monitor/Alert on a key measure and enable Spotter. |

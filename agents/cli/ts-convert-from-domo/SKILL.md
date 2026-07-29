@@ -154,12 +154,17 @@ ts tml import --dir out/ --order tableau --policy ALL_OR_NONE --profile <name>
 ```bash
 ts domo report --output-dir out/          # -> out/migration_report.md
 ```
-Renders `mapping.json` (+ `liveboard_mapping.json`) into a human-readable **`migration_report.md`**
-(same spirit as the qlik/looker reports — see [references/migration-report.example.md](references/migration-report.example.md)):
-a summary table (Migrated / Approximated / NEEDS REVIEW per object type), a **⚠️ Needs review**
-section first (window Beast Modes, inferred/ETL joins, placeholder cards, TML-invariant findings),
-then per-object detail (datasets, Beast Modes with Domo→TS formula, cards). Hand this to the user
-as the deliverable and walk through every NEEDS REVIEW row.
+Renders `mapping.json` (+ `liveboard_mapping.json`) into the family-standard **rich**
+**`migration_report.md`** (same shape as the qlik/looker reports — see
+[references/migration-report.example.md](references/migration-report.example.md)): an
+**Executive summary** (complexity, automation %, effort, risk), **Inventory**, **Modernization**
+(Search/Spotter/semantic opportunities), a **Summary by object type** table, the **Data model**
+(tables, joins, Beast Modes with Domo→TS formula), **Cards → answers**, a **Manual review**
+section that leads with every NEEDS REVIEW item (window Beast Modes, inferred/ETL joins, a
+**chasm-trap** warning when facts share a join key, placeholder cards, TML-invariant findings), a
+**Verification checklist**, and a **Modernization Scorecard**. Every number is derived from the
+mappings — nothing invented. Hand this to the user as the deliverable and walk through every
+NEEDS REVIEW row.
 
 ---
 
@@ -167,6 +172,7 @@ as the deliverable and walk through every NEEDS REVIEW row.
 
 | Version | Date | Summary |
 |---|---|---|
+| 0.5.0 | (rich report) | `ts domo report` now emits the family-standard **rich** report — Executive summary, Inventory, Modernization, Summary-by-object-type, Data model, Cards, Manual review (with a **chasm-trap** warning when facts share a join key), Verification checklist and a Modernization Scorecard — all derived from the mappings. `build-liveboard` mapping now records each card's `ts_chart`. |
 | 0.4.0 | (report + mapping + invocation) | Added `ts domo report` → `migration_report.md` (family-style, Needs-review-first) + worked example. Expanded the Beast Mode formula mapping (math/string/date/type + structural NEEDS-REVIEW) and the translator (`CASE`/window detection). Rewrote invocation guidance: required inputs per path incl. the **dashboard PDF** for card queries and the **Magic ETL** for joins, plus the TML-vs-live-import output gate. |
 | 0.3.0 | (magic-etl + live probe) | `build-model --etl` derives model joins from a Domo Magic ETL export (`magic_etl.parse_etl`). Added `client.py` (internal-API client) as a live-path foundation; probe confirmed datasets/pages/chartType/Beast-Modes are reachable but the card **analyzer query is not** — full card fidelity stays offline (see open-items). |
 | 0.2.0 | (offline build) | `ts domo` CLI implemented for **offline** mode — parse / build-model / build-liveboard, Beast Mode translation, join inference, tests green. Live `domo-cloud` client still pending. |
