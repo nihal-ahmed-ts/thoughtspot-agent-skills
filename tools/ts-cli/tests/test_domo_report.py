@@ -43,8 +43,34 @@ def test_report_command_writes_markdown(tmp_path):
     assert r3.exit_code == 0, r3.stdout + getattr(r3, "stderr", "")
     md = (tmp_path / "migration_report.md").read_text()
     assert "# Domo → ThoughtSpot Migration Report" in md
-    assert "## Summary" in md
+    assert "## Summary by object type" in md
     assert "Needs review" in md
     assert "Beast Modes → Formulas" in md
+    # rich-format sections (family shape: exec summary framing + scorecard)
+    assert "## Executive summary" in md
+    assert "**Automation %:**" in md
+    assert "## Manual review" in md
+    assert "## Verification checklist" in md
+    assert "## ThoughtSpot Modernization Scorecard" in md
     # the inferred join is flagged for review
     assert "inferred by shared column name" in md
+
+
+def test_report_flags_chasm_trap_from_shared_join_key(tmp_path):
+    """Two joins on the same key -> a chasm-trap warning surfaces."""
+    from ts_cli.domo.report import render_report
+
+    mapping = {
+        "source": {"mode": "offline", "app_name": "Multi-fact"},
+        "datasets": [{"name": "Orders", "ts_table": "Orders", "columns": 5, "status": "Migrated"}],
+        "joins": [
+            {"left": "Orders", "right": "Items", "on": "order_id", "source": "magic_etl",
+             "status": "NEEDS REVIEW", "note": "from Magic ETL join graph"},
+            {"left": "Orders", "right": "Payments", "on": "order_id", "source": "magic_etl",
+             "status": "NEEDS REVIEW", "note": "from Magic ETL join graph"},
+        ],
+        "beast_modes": [], "renamed_columns": [], "invariant_findings": [],
+    }
+    md = render_report(mapping, {"cards": [], "pages": []})
+    assert "chasm" in md.lower()
+    assert "order_id" in md

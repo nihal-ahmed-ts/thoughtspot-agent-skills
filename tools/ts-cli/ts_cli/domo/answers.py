@@ -118,6 +118,7 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
         x += w
         mapping_cards.append({
             "urn": card.urn, "title": card.title, "chart_type": card.chart_type,
+            "ts_chart": ans.get("chart", {}).get("type", "TABLE"),
             "status": "NEEDS REVIEW" if review else "Migrated", "note": reason,
         })
 
