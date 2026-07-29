@@ -9,7 +9,8 @@ skipped, human required).
 | Domo object | ThoughtSpot target | Status | Notes |
 |---|---|---|---|
 | Dataset (`schema.columns`) | Table TML | Migrated | type map: STRING/DATETIME/DOUBLE/LONG |
-| Dataset-to-dataset join | Model join | Approximated | **inferred by shared column name** — no join metadata in Domo; confirm cardinality |
+| Dataset-to-dataset join (no ETL) | Model join | Approximated | **inferred by shared column name** — no join metadata; confirm cardinality |
+| Magic ETL join graph (`--etl`) | Model joins | Approximated | `MergeJoin` keys + type → model joins (preferred over inference); side/cardinality star-to-fact, flagged NEEDS REVIEW |
 | Beast Mode (global) | Model formula | Migrated / see formula map | window/LOD → NEEDS REVIEW |
 | Card-local `calculatedFields` | Model formula | Migrated | deduped against global by `(dataset, name)` |
 | Card `kpi` | Answer (KPI/headline) | Migrated | from `summaryNumber` |

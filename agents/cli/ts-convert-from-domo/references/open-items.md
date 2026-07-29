@@ -34,3 +34,31 @@ verifies each against real Domo payloads.
 - Cards with `dateRangeFilter` (relative date handling).
 - Multi-page apps and Domo "collections" → multi-tab Liveboards.
 - Card drill paths / links between cards.
+
+## Magic ETL → Model joins (implemented)
+- `magic_etl.parse_etl()` reads a Domo Magic ETL export (`{data:{actions:[…]}}`):
+  `LoadFromVault`→source table, `MergeJoin`→join (keys + type), `Metadata`/Alter
+  Columns→renames, `PublishToVault`→output. `build-model --etl <file>` uses these
+  joins instead of shared-column inference.
+- GOTCHA: join *side* is resolved by following each `MergeJoin.step1` down to its
+  primary `LoadFromVault` (star-to-fact). A dim→dim join (e.g. Products → Category
+  Translation on `product_category_name`) gets attached to the fact instead of
+  Products — correct column lineage needs the dataset schemas. Every ETL-derived
+  join is therefore flagged NEEDS REVIEW.
+
+## Live `domo-cloud` (developer-token) — probe findings (2026-07)
+Verified against a real instance with an `X-DOMO-Developer-Token` (internal API):
+- **Reachable:** datasets (`/api/data/v3/datasources`), pages
+  (`/api/content/v1/pages`, `/pages/{id}/cards`, `/api/content/v3/stacks/{id}/cards`),
+  full card **metadata incl. chartType** (`/api/content/v1/cards?urns=…&parts=metadata,…`),
+  Beast Modes (`POST /api/query/v1/functions/search`). `ts_cli/domo/client.py` wraps these.
+- **NOT reachable (blocks full live cards):** the card's **analyzer query** (which
+  measure/dimension/aggregation/filter it plots) — every candidate endpoint
+  (`…/analyzer`, `…/definition`, `…/render`, `parts=problem,columns,dataset`, `v3/cards`)
+  returned 404/405 or metadata-only. And the internal **dataset column list** endpoint
+  wasn't found (schema endpoint returns `columnCount` but not columns; the public
+  Developer API `GET /v1/datasets/{id}` does return `schema.columns`).
+- **Conclusion:** `client.py` is a working foundation for a *partial* live mode
+  (datasets + page structure + chartType + Beast Modes), but full card→Answer
+  fidelity still needs the **offline** capture (the analyzer query isn't exposed by
+  any Domo API a token can reach). Live mode is not wired into `parse_app` yet.

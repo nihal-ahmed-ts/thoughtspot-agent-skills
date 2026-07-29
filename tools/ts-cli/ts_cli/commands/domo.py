@@ -39,15 +39,24 @@ def build_model_cmd(
     model_name: Optional[str] = typer.Option(None, "--model-name", "-m"),
     output_dir: str = typer.Option("out", "--output-dir", "-o"),
     mode: str = typer.Option("offline", "--mode"),
+    etl: Optional[str] = typer.Option(None, "--etl",
+        help="Domo Magic ETL export JSON — drives model joins from the dataflow's join graph"),
 ) -> None:
+    import json as _json
+
     from ts_cli.domo.build_model import build_model_artifacts
     from ts_cli.domo.parsing import parse_app
     from ts_cli.tml_common import dump_tml_yaml
 
     app_ir = parse_app(input_dir, mode=mode)
+    explicit_joins = None
+    if etl:
+        from ts_cli.domo.magic_etl import parse_etl
+        explicit_joins = parse_etl(_json.load(open(etl)))["joins"]
+        typer.echo(f"Using {len(explicit_joins)} join(s) from Magic ETL {etl}", err=True)
     arts = build_model_artifacts(
         app_ir, connection_name=connection_name, db=database, schema=schema,
-        model_name=model_name)
+        model_name=model_name, explicit_joins=explicit_joins)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     for fn, doc in arts["tables"].items():
@@ -56,6 +65,27 @@ def build_model_cmd(
     (out / "mapping.json").write_text(json.dumps(arts["mapping"], indent=2))
     typer.echo(f"Model artifacts → {output_dir}", err=True)
     print(json.dumps({"counts": arts["counts"], "model": arts["model"]["filename"]}, indent=2))
+
+
+@app.command("report")
+def report_cmd(
+    output_dir: str = typer.Option("out", "--output-dir", "-o",
+        help="Dir holding mapping.json (+ liveboard_mapping.json) from build-model/build-liveboard"),
+    output_file: Optional[str] = typer.Option(None, "--output",
+        help="Report path (default: <output-dir>/migration_report.md)"),
+) -> None:
+    """Render a Markdown migration report from the build mappings."""
+    from ts_cli.domo.report import render_report
+
+    out = Path(output_dir)
+    mapping = json.loads((out / "mapping.json").read_text())
+    lb_path = out / "liveboard_mapping.json"
+    lb = json.loads(lb_path.read_text()) if lb_path.exists() else None
+    md = render_report(mapping, lb)
+    dest = Path(output_file) if output_file else (out / "migration_report.md")
+    dest.write_text(md)
+    typer.echo(f"Migration report → {dest}", err=True)
+    print(str(dest))
 
 
 @app.command("build-liveboard")

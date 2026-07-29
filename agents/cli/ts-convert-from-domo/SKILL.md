@@ -22,32 +22,49 @@ definition, page). Two source modes:
 Ask one question at a time for **dependent** decisions (where the next depends on the answer);
 **batch independent** questions into a single prompt to keep the migration fast.
 
-## On invocation — establish the two paths first
+## On invocation — gather the right inputs first
 
-Before running anything, settle **two independent choices** with the user. They combine freely
-(e.g. offline files → import to a live cluster is valid).
+**Ask what the user has before running anything.** Missing inputs are the main cause of weak
+results, so make the expectations explicit. Two independent choices, plus one clarification:
 
-**1. Source path — how will the Domo dashboard be read?**
+### 1. Source — how the Domo objects are read
 
-| Choice | What the user provides | Notes |
+| Choice | What the user provides | Gives you |
 |---|---|---|
-| **Offline (files)** — *default* | A **directory** of exported Domo JSON: one file per dataset, the beast-mode list, each card, and the page (the layout of `tests/fixtures/domo/`). | No Domo credentials. Best-effort; gaps flagged. |
-| **API (live)** | Sets up a Domo profile (`/ts-profile-domo`): instance URL + OAuth2 client credentials. | Pulls exact definitions live (SOURCE provenance). |
+| **Offline (files)** — *default* | A **directory** of exported Domo JSON: dataset schemas, the beast-mode list, each card, the page (layout of `tests/fixtures/domo/`). | Datasets, Beast Modes, chart types, page layout. |
+| **API (live)** | A Domo profile (`/ts-profile-domo`): instance URL + creds. Client-credentials → datasets + page structure; a **developer token** additionally reaches card metadata + Beast Modes (internal API). | Same as above, pulled live. |
 
-If the user is unsure, use **offline** — it needs only exported files.
+⚠️ **Critical, learned the hard way:** *neither* the offline card JSON *nor* any Domo API reliably
+exposes a card's **analyzer query** (which measure/dimension/aggregation it plots). For faithful
+**cards → Answers you also need the dashboard as a PDF** (Domo → Export → PDF). Read the card's
+chart/axes from the PDF — this is the "no-API / PDF + warehouse model" pattern (as in
+`ts-convert-from-qlik`). Without it, cards degrade to title + chart-type placeholders (flagged).
 
-**2. Output path — TML files or created live in ThoughtSpot?**
+### 2. For accurate model joins (recommended)
+
+Ask for the **Magic ETL export JSON** of the dataflow that builds the dashboard's dataset. Pass it
+via `build-model --etl` — joins come from the real `MergeJoin` graph instead of shared-column
+inference.
+
+### 3. Output — TML files, or created live in ThoughtSpot?
 
 | Choice | Result | Requires |
 |---|---|---|
-| **TML files** — *default* | Generated Table / Model / Answer / Liveboard TML + `mapping.json` land in `out/`. Nothing is written to any ThoughtSpot instance. | nothing |
-| **Direct create** | The skill additionally **imports** the TML so the objects are created on the user's cluster. | a `ts-profile-thoughtspot` profile (login/auth) |
+| **TML files** — *default* | Table / Model / Answer / Liveboard TML + `mapping.json` land in `out/`; the user imports them. | nothing |
+| **Direct create** | The skill also **imports** the TML so objects are created on the user's cluster. | a `ts-profile-thoughtspot` profile **and** the source tables already present in a connection on that cluster/org (the Model binds to them by name/GUID). |
 
-Default to **TML files**. Only run the `ts tml import` steps if the user opts into direct-create
-**and** a ThoughtSpot profile exists — otherwise stop at the TML in `out/` and tell them how to
-import later. Confirm the target profile before any import.
+Default to **TML files**. Only import if the user opts into direct-create, a ThoughtSpot profile
+exists, **and** the underlying tables are already in the target connection — otherwise stop at the
+TML and tell them how to import. Confirm the target profile/org before any import.
 
-Confirm both choices before Step 0.
+### Best-results checklist (state this to the user)
+- ✅ Dataset schemas (offline files or live) — for tables
+- ✅ Beast-mode list (offline/live) — for Model formulas
+- ✅ **Dashboard PDF** — for card queries (else cards are placeholders)
+- ✅ **Magic ETL export** — for accurate joins
+- ✅ For live creation: a ThoughtSpot profile + the tables already loaded in the target connection
+
+Confirm these before Step 0.
 
 ## References
 
@@ -98,14 +115,15 @@ guessing.
 ### Step 1 — Build the model
 ```bash
 ts domo build-model --input <bundle-dir> --connection "<TS connection>" \
-  --database <DATABASE> --schema <SCHEMA> --model-name "<Model name>" --out out/ \
-  [--overrides overrides.json]
+  --database <DATABASE> --schema <SCHEMA> --model-name "<Model name>" --output-dir out/ \
+  [--etl <magic_etl_export.json>]
 ```
 Emits Table TML(s) + Model TML + `mapping.json`. Dataset columns map by the type table
 (`STRING→VARCHAR` attr, `DOUBLE/LONG→MEASURE`, …). Beast Modes become `[formula_<name>]`
-id-referenced formulas (single-pass import). **Joins are not in Domo metadata** — inferred by
-shared column name (e.g. `Customer ID`) or taken from `--overrides`, and every inferred join is
-flagged `NEEDS REVIEW`. Read `mapping.json`.
+id-referenced formulas (single-pass import). **Joins:** if a **Magic ETL export** is supplied
+via `--etl`, joins come from the dataflow's `MergeJoin` graph (keys + type) — the accurate
+source; otherwise they're inferred by shared column name. Either way each join is flagged
+`NEEDS REVIEW` (side/cardinality is inferred without full column lineage). Read `mapping.json`.
 
 ### Step 2 — Validate & import the model
 ```bash
@@ -133,10 +151,15 @@ ts tml import --dir out/ --order tableau --policy ALL_OR_NONE --profile <name>
 ```
 
 ### Step 4 — Migration report
-`mapping.json` accounts for every dataset, Beast Mode, card and page with a status (Migrated /
-Approximated / NEEDS REVIEW / Skipped), plus `notes`. Hand it to the user as the deliverable,
-calling out every NEEDS REVIEW row (window Beast Modes, inferred joins, unknown cards) for manual
-rebuild.
+```bash
+ts domo report --output-dir out/          # -> out/migration_report.md
+```
+Renders `mapping.json` (+ `liveboard_mapping.json`) into a human-readable **`migration_report.md`**
+(same spirit as the qlik/looker reports — see [references/migration-report.example.md](references/migration-report.example.md)):
+a summary table (Migrated / Approximated / NEEDS REVIEW per object type), a **⚠️ Needs review**
+section first (window Beast Modes, inferred/ETL joins, placeholder cards, TML-invariant findings),
+then per-object detail (datasets, Beast Modes with Domo→TS formula, cards). Hand this to the user
+as the deliverable and walk through every NEEDS REVIEW row.
 
 ---
 
@@ -144,5 +167,7 @@ rebuild.
 
 | Version | Date | Summary |
 |---|---|---|
+| 0.4.0 | (report + mapping + invocation) | Added `ts domo report` → `migration_report.md` (family-style, Needs-review-first) + worked example. Expanded the Beast Mode formula mapping (math/string/date/type + structural NEEDS-REVIEW) and the translator (`CASE`/window detection). Rewrote invocation guidance: required inputs per path incl. the **dashboard PDF** for card queries and the **Magic ETL** for joins, plus the TML-vs-live-import output gate. |
+| 0.3.0 | (magic-etl + live probe) | `build-model --etl` derives model joins from a Domo Magic ETL export (`magic_etl.parse_etl`). Added `client.py` (internal-API client) as a live-path foundation; probe confirmed datasets/pages/chartType/Beast-Modes are reachable but the card **analyzer query is not** — full card fidelity stays offline (see open-items). |
 | 0.2.0 | (offline build) | `ts domo` CLI implemented for **offline** mode — parse / build-model / build-liveboard, Beast Mode translation, join inference, tests green. Live `domo-cloud` client still pending. |
 | 0.1.0 | (scaffold) | Skill structure, IR contract, Beast Mode mapping, fixtures — CLI impl pending |

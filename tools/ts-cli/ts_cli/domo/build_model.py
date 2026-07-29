@@ -75,7 +75,15 @@ def _infer_joins(datasets: list[Dataset]) -> tuple[list[dict], list[tuple]]:
 
 def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema: str,
                           model_name: Optional[str] = None,
-                          type_overrides: Optional[dict] = None) -> dict:
+                          type_overrides: Optional[dict] = None,
+                          explicit_joins: Optional[list] = None) -> dict:
+    """Build Table + Model TML + mapping.
+
+    ``explicit_joins`` (e.g. from a Magic ETL export, see magic_etl.parse_etl) — a
+    list of ``{left_table, right_table, type, keys:[{left,right}]}`` — overrides the
+    shared-column-name inference. Each is still flagged NEEDS REVIEW because the
+    join side/cardinality is inferred without full column lineage.
+    """
     model_name = model_name or f"{app.app_name} Model"
 
     tables: list[dict] = []
@@ -104,7 +112,16 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
                 "column_type": _col_type(ts_type),
             })
 
-    joins, join_notes = _infer_joins(app.datasets)
+    if explicit_joins is not None:
+        joins = explicit_joins
+        join_source = "magic_etl"
+        join_notes = [
+            (j["left_table"], j["right_table"],
+             ", ".join(k["left"] for k in j.get("keys", [])))
+            for j in explicit_joins]
+    else:
+        joins, join_notes = _infer_joins(app.datasets)
+        join_source = "shared_column_name"
 
     # Beast Modes: global + card-local, deduped by (data_source_id, name).
     all_bm = list(app.beast_modes)
@@ -130,19 +147,23 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
 
     # Two model-join fixes the shared emitter doesn't apply:
     #  1. A join must declare a cardinality (emitter sets only type).
-    #  2. A join must live on the FK/source (MANY) side ONLY — the emitter emits
+    #  2. A join must live on the source (FK/MANY) side ONLY — the emitter emits
     #     it on both tables (bidirectional), which fails model schema validation.
-    # Derive the MANY side from row counts (larger table = fact = MANY side).
+    # The source side is the declared left_table of each join (the fact for ETL
+    # chains, the first dataset for inferred joins); cardinality is refined by row
+    # count when known, else MANY_TO_ONE.
+    directed = {(j["left_table"], j["right_table"]) for j in joins}
     rows_by_table = {ds.name: (ds.rows or 0) for ds in app.datasets}
     for mt in model_tml.get("model", {}).get("model_tables", []):
-        here = rows_by_table.get(mt.get("name"), 0)
+        name = mt.get("name")
         kept = []
         for j in mt.get("joins", []):
-            there = rows_by_table.get(j.get("with"), 0)
-            if here >= there:  # this is the MANY side — keep the join here
-                j["cardinality"] = "MANY_TO_ONE"
-                kept.append(j)
-            # else: ONE side — drop; the join belongs on the MANY side entry
+            other = j.get("with")
+            if (name, other) not in directed:  # keep only on the source side
+                continue
+            here, there = rows_by_table.get(name, 0), rows_by_table.get(other, 0)
+            j["cardinality"] = "ONE_TO_MANY" if (here and there and here < there) else "MANY_TO_ONE"
+            kept.append(j)
         if kept:
             mt["joins"] = kept
         else:
@@ -158,8 +179,10 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
             {"domo_id": d.id, "name": d.name, "ts_table": d.name,
              "columns": len(d.columns), "status": "Migrated"} for d in app.datasets],
         "joins": [
-            {"left": a, "right": b, "on": k, "inferred": True,
-             "status": "NEEDS REVIEW", "note": "inferred by shared column name"}
+            {"left": a, "right": b, "on": k, "inferred": True, "source": join_source,
+             "status": "NEEDS REVIEW",
+             "note": ("from Magic ETL join graph" if join_source == "magic_etl"
+                      else "inferred by shared column name")}
             for (a, b, k) in join_notes],
         "beast_modes": mapping_formulas,
         "renamed_columns": renamed_cols,
