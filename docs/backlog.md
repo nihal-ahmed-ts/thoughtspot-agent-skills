@@ -4926,3 +4926,260 @@ Three independent small items:
 
 **Target:** opportunistic -- (1)/(2) are validator/doc touches; (3) needs a 2026.2
 workbook to become actionable.
+
+---
+
+## BL-166 -- `custom_extensions`-style loss stash for the ts-convert-* pairs `Tier 2`
+
+**Filed:** 2026-07-29.
+**Source:** 2026-07-29 Apache Ossie converter review
+(`docs/reviews/2026-07-29-ossie-converter-learnings.md`), finding F11.
+**Affects:** `agents/cli/ts-convert-to-snowflake-sv/` (SKILL.md +
+`references/coverage-matrix.md`), `agents/cli/ts-convert-from-snowflake-sv/`,
+`agents/cli/ts-convert-to-databricks-mv/`, `agents/cli/ts-convert-from-databricks-mv/`,
+`tools/ts-cli/ts_cli/` (`build-sv`/`parse-sv`, `build-mv`/`parse-mv`), `tools/ts-cli/tests/`.
+**Status:** OPEN.
+
+41 limitation rows across the four coverage matrices (13 to-SF, 8 from-SF, 10 to-DBX,
+10 from-DBX) resolve to "documented in the Unmapped Properties Report, then gone" --
+`format_pattern`, `geo_config`, `column_groups`, `default_date_bucket`, `custom_order`,
+locale aliases and partial `ai_context` on the way out; `ACCESS_MODIFIER: PRIVATE`,
+table-level synonyms, `is_enum` and sample values on the way in. A TS->SV->TS round trip
+cannot recover any of them and nothing in the repo measures how much is lost. Upstream's
+databricks converter solves the identical problem with a `write_stash`/`read_stash` pair
+over `custom_extensions`, and asserts the result as parsed-dict equality with zero
+normalization.
+
+The sharpest part of the finding: **we already ship the plumbing and don't use it for
+preservation.** `ts-convert-to-snowflake-sv` emits `with extension (CA='{ca_json}')` and
+`ts-convert-from-snowflake-sv` parses that same clause -- but the from-side coverage matrix
+row 31 records the handling as "Parsed only ... Type confirmation; not mapped to TML". A
+versioned, ThoughtSpot-keyed JSON payload written on export and read on import is a small
+change to two CLI commands that would make the pair lossy-by-declaration rather than
+lossy-by-default.
+
+**Approach** -- the five details below are all load-bearing, not polish (each verified in
+the review; section refs are to the report):
+
+1. The payload is a **serialised JSON string**, never a nested object (report section 1 #1:
+   `osi-schema.json` constrains the equivalent field to a string with
+   `additionalProperties: false`; our own DDL clause is a quoted scalar).
+2. Version it with a `_v` marker and **merge into an existing entry** rather than appending
+   a second one.
+3. Restore as **stash-if-present-else-derive** (report section 2.3). A stash-only design
+   breaks on any input the converter did not itself produce -- i.e. every hand-written SV
+   or MV, which is most real inputs.
+4. Golden and round-trip comparisons must `json.loads` both sides before comparing
+   (upstream's `canon()` helper): serialised key order is not stable.
+5. Give the round trip two explicit equality bars -- a *documented-lossy* one that
+   normalizes known drops through a named helper (upstream's `strip_dropped`), and a
+   *lossless* one asserting parsed equality with no normalization at all.
+
+**Scope:** start with the Snowflake pair, where the extension clause already exists on both
+sides. Databricks MV has no equivalent carrier identified yet, so that half needs a
+placement decision first. Then update each coverage-matrix limitation row to state
+*preserved-via-stash* vs *dropped*.
+
+**Validator promotion this unlocks (file once the mechanism exists):** extend
+`check_coverage_matrix.py` so every limitation row must declare preserved-vs-dropped --
+per the two-bucket rule, the promotion is the point, but it cannot precede the mechanism.
+
+**Target:** next converter edit on the Snowflake pipeline, or bundled with BL-100 (bring
+remaining converters to the DBX-from standard, Snowflake pipeline first).
+
+---
+
+## BL-167 -- Record (or change) the to-direction's never-hard-error-on-loss posture `Tier 3`
+
+**Filed:** 2026-07-29.
+**Source:** 2026-07-29 Apache Ossie converter review
+(`docs/reviews/2026-07-29-ossie-converter-learnings.md`), finding F14.
+**Affects:** `agents/shared/schemas/ts-model-conversion-invariants.md`, the four
+`references/coverage-matrix.md` files, `agents/cli/ts-convert-to-snowflake-sv/SKILL.md`,
+`agents/cli/ts-convert-to-databricks-mv/SKILL.md`.
+**Status:** OPEN.
+
+Our from-direction hard-errors on constructs it cannot represent (MV-on-MV fail-loud,
+`unsupported[]` + exit 1, the joinless-SV decision prompt), but our **to-direction never
+hard-errors over information loss**: every unmapped construct is a warn-and-drop into the
+Unmapped Properties Report, and the only exit-1 gates there are structural
+(`ts snowflake lint-ddl` errors). Upstream's databricks import direction takes the opposite
+line deliberately -- a condition-less/cross join, a non-equi `on`, a reserved/duplicate join
+name or an unsupported input version all raise `ConversionError`, on the explicit grounds
+that losslessness is that direction's purpose; the single drop-with-warning exception is a
+wildcard column, which has no field identity to preserve.
+
+There is a defensible reason for our asymmetry -- the to-direction ends at a mandatory
+Step 10 human checkpoint that shows the report before anything is written -- but it is
+currently an accident of how the two directions grew rather than a decision on record.
+
+**Approach:** state the posture explicitly as a short subsection in
+`ts-model-conversion-invariants.md` (where the cross-converter rules already live, alongside
+I1-I12/N1/PT1), naming which loss classes are warn-and-drop **by design** and which, if any,
+should become hard errors. Cheaper and sharper after BL-166, because a stash changes the
+answer: a construct that can be preserved should never have been a drop in the first place.
+
+**Target:** opportunistic -- with BL-166, or the next edit to the invariants file.
+
+---
+
+## BL-168 -- Property-based tests for the ts-cli converter builders (dual-driver) `Tier 2`
+
+**Filed:** 2026-07-29.
+**Source:** 2026-07-29 Apache Ossie converter review
+(`docs/reviews/2026-07-29-ossie-converter-learnings.md`), finding F15.
+**Affects:** `tools/ts-cli/tests/`, `tools/ts-cli/pyproject.toml` (`dev` extra),
+`.github/workflows/validate.yml`.
+**Status:** OPEN.
+
+All 3,808 cases collected from `tools/ts-cli/tests/` are example-based. There is no
+`hypothesis` dependency or import anywhere in the repo and it is absent from
+`tools/ts-cli/pyproject.toml`'s `dev` extra (`pytest`, `PyYAML`, `radon`, `vulture`,
+`pip-audit`). Upstream's databricks converter runs Hypothesis at 300 examples per property.
+
+The gap matters more than the raw absence suggests because **the properties are already
+written**: `agents/shared/schemas/ts-model-conversion-invariants.md` states I1-I12, N1 and
+PT1 -- 14 rules -- as universally-quantified statements over generated Model TML ("for every
+entry in `formulas[]` there must be a corresponding entry in `columns[]`..."). What is only
+partly built is the checker: `tools/ts-cli/ts_cli/tml_lint.py` implements **6 of the 14** --
+I1, I2, I4, I5, I8 and I12, plus a guid-placement rule. So today six invariants are checked,
+and only against the handful of documents a fixture or a live run happens to produce; the
+other eight are enforced by author discipline alone.
+
+**Approach** -- two components, sequenced, not one:
+
+1. **The generator.** A strategy producing arbitrary in-subset `parsed.json` documents,
+   asserting `lint_tml(build_model(parsed, translated, tables)) == []`. Even confined to the
+   6 invariants lint already covers, this tests the **builder** rather than the documents our
+   fixtures happen to contain -- a materially stronger claim, and the duplicate-`column_id`
+   class (I8, ts-cli v0.92.0, shipped in `from-snowflake-sv` 1.19.0 / `from-databricks-mv`
+   1.10.0) is exactly the kind of bug it would have caught by construction instead of the
+   hard way. This half is worth doing on its own.
+2. **Checkers for the assertable remainder.** I3, I6, I9, I10, I11 and N1 are mechanically
+   assertable over emitted TML but have no `tml_lint.py` check today, so a property test
+   cannot exercise them until one exists -- each is a small addition to the same module, and
+   each also strengthens the existing pre-import `ts tml lint` gate independently of any
+   property test. I7 (a MANDATORY consult gate on the author) and PT1 (a flag-for-review
+   rule) are **not** assertions over output and stay outside both lint and any property test;
+   they are deliberately out of scope here.
+3. Restrict generation to the **round-trippable subset** rather than generating everything
+   and excepting the failures -- upstream's decision, and what stops a property test
+   degenerating into a list of known-bad shapes.
+4. **The dual driver is load-bearing here, not optional polish.** `validate.yml` installs
+   `pytest pyyaml radon pip-audit` on its 3.12 job and only `pytest pyyaml` on the
+   3.10/3.11/3.13/3.14 matrix legs, so a Hypothesis-only test would be silently skipped on
+   every leg as configured today, and adding the dependency to the 3.12 job alone still
+   leaves four legs uncovered. Mirror upstream: `pytest.importorskip("hypothesis")` plus a
+   hand-rolled seeded `Rnd` implementing the same interface, so the same properties run
+   either way.
+
+**Validator promotion this unlocks (file once the first property test exists):** assert that
+any test importing `hypothesis` has a seeded counterpart, or that `hypothesis` is installed
+on every CI leg.
+
+**Target:** next ts-cli converter-builder change. Splittable: the generator over the 6
+already-checked invariants (item 1) plus the seeded driver (item 4) is the smaller first
+increment and delivers value alone; the six new lint checks (item 2) can land incrementally
+after it, or opportunistically whenever `tml_lint.py` is next touched.
+
+---
+
+## BL-169 -- Vendor-neutral TPC-DS fixture corpus (Phase-3-coupled) `Tier 3`
+
+**Filed:** 2026-07-29.
+**Source:** 2026-07-29 Apache Ossie converter review
+(`docs/reviews/2026-07-29-ossie-converter-learnings.md`), finding F24.
+**Affects:** upstream `converters/thoughtspot/tests/fixtures/` (Phase 3); in this repo,
+`tools/ts-cli/tests/fixtures/` and `agents/shared/worked-examples/` only if the corpus is
+mirrored inward at Phase 5.
+**Status:** OPEN.
+
+Our fixtures are richer and better grounded than upstream's -- `agents/shared/worked-examples/`
+holds 4 Snowflake and 3 Databricks end-to-end conversions that `agents/shared/CLAUDE.md`
+makes normative because each was verified against a live instance -- and they do recur across
+converters: the Dunder Mifflin Sales & Inventory schema is the shared spine of three worked
+examples (to-snowflake-sv, from-snowflake-sv, to-databricks-mv), with the same model object
+reused again as the target of two Tableau set examples. What is missing is a
+**vendor-neutral, ecosystem-shared** corpus. Dunder Mifflin is ThoughtSpot-shaped and
+repo-local, so however many of our converters it exercises it can never make one of them
+comparable against an upstream converter -- and there is no TPC-DS anywhere in the repo.
+Upstream's `tpcds_ossie.yaml` / `tpcds_metric_view.yaml` pair (and
+`examples/tpcds_semantic_model.yaml`) is the schema the whole ecosystem is compared on.
+
+**Why this is Phase-3-coupled rather than a general repo improvement:** TPC-DS only buys
+comparability once there is something to compare against, i.e. the Phase-3
+`converters/thoughtspot/` package -- whose spec already calls for a `tpcds_*` fixture pair.
+Adopting it here first would add a fixture none of our converters is measured against.
+
+**Approach:** take `tpcds_ossie.yaml` verbatim as the Phase-3 from-Ossie input fixture and
+assert the emitted Model TML against a golden -- our first fixture shared with anything
+outside this repo, and so our first cross-ecosystem comparability. Note that upstream CI is
+offline and cannot depend on our CLI, so the `ts tml lint` pass over the emitted TML belongs
+in local development and at Phase-5 back-port time, not in the upstream workflow (the report
+states the `ts tml lint` assertion without drawing that boundary). Then decide at Phase 5
+whether the TPC-DS Model TML also belongs in `agents/shared/worked-examples/`.
+
+**Target:** with the Phase-3 converter's first test PR -- see
+`docs/superpowers/specs/2026-07-29-ossie-thoughtspot-converter-design.md`, Phase 3.
+
+---
+
+## BL-170 -- Live-verify four internal ground-truth conflicts in the ThoughtSpot formula references `Tier 2`
+
+**Filed:** 2026-07-29.
+**Source:** the `docs/ossie/ts-osi-function-mapping.md` review on the
+`feat/ossie-converter-design` branch -- writing one row per Ossie function forced a
+side-by-side read of every ThoughtSpot formula reference we ship, which is what surfaced
+these. Cross-referenced from that document's *Rows pending live confirmation* section.
+**Affects:** `agents/shared/schemas/thoughtspot-formula-patterns.md`,
+`agents/shared/mappings/tableau/tableau-formula-translation.md`,
+`agents/shared/mappings/ts-databricks/ts-databricks-formula-translation.md`,
+`agents/shared/mappings/qlik/qlik-thoughtspot-formula-translation.md`, and any converter
+whose emitter branches on these functions.
+**Status:** OPEN.
+
+Four function-level claims about ThoughtSpot's *own* formula language are stated
+incompatibly across our shared references. In each case one of the files is wrong, so at
+least one converter is emitting either an invalid native call or an unnecessary
+pass-through -- and the two failure modes are asymmetric: a wrong "native" claim produces a
+formula that fails at import, while a wrong "no native" claim only costs fidelity.
+
+| # | Function(s) | Claim A | Claim B |
+|---|---|---|---|
+| a | `replace` | native: `replace ( [x] , [old] , [new] )` (`thoughtspot-formula-patterns.md:186`), and the Databricks mapping's ThoughtSpot column agrees (`ts-databricks-formula-translation.md:84`) | "Bare `replace(...)` is **NOT** a valid ThoughtSpot formula function (live-confirmed)" -- re-mapped to `sql_string_op` and CLI-translated in ts-cli v0.81.0 (`tableau-formula-translation.md:117`, `:172`, `:1032`, `:1125`) |
+| b | `starts_with` / `ends_with` | native, returning boolean (`thoughtspot-formula-patterns.md:188-189`); `starts_with` again in `ts-databricks-formula-translation.md:86` | "No native `starts_with`" / "No native `ends_with`", composed from `strpos` / `substr` instead (`tableau-formula-translation.md:227-228`, live-verified 2026-06-13 on se-thoughtspot) |
+| c | `ltrim` / `rtrim` | exist as ThoughtSpot functions (`ts-databricks-formula-translation.md:82-83`, whose left-hand column is the ThoughtSpot side) | "ThoughtSpot `trim()` removes both sides -- no left-only / right-only trim available" (`qlik-thoughtspot-formula-translation.md:180-181`). `thoughtspot-formula-patterns.md` lists `trim` only and names neither, so it corroborates neither side |
+| d | `in` literal-list delimiter | `[col] in ( 'a' , 'b' )` -- round parentheses (`thoughtspot-formula-patterns.md:134`) | `in { a , b , c }` -- curly braces required; the round form raises the parser error "Search did not find 'in ( ...'" (`tableau-formula-translation.md:41`) |
+
+Rows (a), (b) and (d) each have a live-confirmed side (the Tableau mapping, dated and
+attributed to se-thoughtspot), which is the likelier-correct one and makes
+`thoughtspot-formula-patterns.md` -- the file CLAUDE.md treats as the formula ground truth --
+the probable defect in all three. Row (c) has no live evidence on either side. Either way
+the fix is not a guess: these are four one-line formula probes.
+
+**Approach:**
+
+1. On a live instance, create one Model formula per claim and record accept/reject:
+   `replace ( [col] , 'a' , 'b' )`; `starts_with ( [col] , 'x' )` and
+   `ends_with ( [col] , 'x' )`; `ltrim ( [col] )` and `rtrim ( [col] )`;
+   `[col] in ( 'a' , 'b' )` **and** `[col] in { 'a' , 'b' }`. Import via
+   `ts tml import` so the check is the real parser, not the UI.
+2. Correct whichever reference is wrong, with the date and instance recorded in the row --
+   the same live-verification convention `thoughtspot-formula-patterns.md:182` and
+   `tableau-formula-translation.md:227` already use. Where a function does not exist, state
+   the pass-through or composition explicitly so no converter re-derives it.
+3. Where the two spellings coexist by build, say so rather than picking one: the `in`
+   delimiter is the candidate for that treatment.
+4. Update the affected emitters and the Ossie function-mapping document's *Rows pending
+   live confirmation* table with the result (a `passthrough` -> `direct` flip on
+   `LTRIM`/`RTRIM` also moves that document's counts, which it already records).
+
+**Validator promotion this could unlock:** the disagreement is only detectable by reading
+four files side by side. A `check_formula_catalog.py` extension that cross-checks each
+ThoughtSpot function name appearing in a mapping's ThoughtSpot column against
+`thoughtspot-formula-patterns.md` -- and fails when one file calls a function native and
+another calls it absent -- would make this class of drift impossible to reintroduce. Worth
+filing once the four facts are settled, since the checker needs a correct baseline.
+
+**Target:** next live-instance pass on se-thoughtspot; bundle with any converter formula
+work that touches these functions.
