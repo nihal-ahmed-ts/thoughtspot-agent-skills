@@ -10,6 +10,7 @@ closure. Never fork these into a platform module; import them.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +195,192 @@ def add_formula_prefix(
         return m.group(0)
 
     return re.sub(r"\[([^\]]+)\]", _replace, expr)
+
+
+# ---------------------------------------------------------------------------
+# sql_*_op pass-through rewriting (BL-171)
+# ---------------------------------------------------------------------------
+
+def _split_top_level_args(inner: str) -> list[str]:
+    """Split a call's argument text on top-level commas (quote/paren aware)."""
+    args: list[str] = []
+    depth, quote, cur = 0, None, []
+    for ch in inner:
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+            cur.append(ch)
+        elif ch in "([{":
+            depth += 1
+            cur.append(ch)
+        elif ch in ")]}":
+            depth -= 1
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        args.append("".join(cur).strip())
+    return [a for a in args if a != ""]
+
+
+def _close_paren(text: str, open_idx: int) -> int:
+    """Index of the ')' matching the '(' at open_idx, or -1 (quote aware)."""
+    depth, quote = 0, None
+    for i in range(open_idx, len(text)):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _quoted_spans(text: str) -> list[tuple[int, int]]:
+    """[(start, end)) index ranges covered by string literals.
+
+    Both quote styles matter: a ThoughtSpot literal is `'...'` and an
+    `sql_*_op` template is `"..."`, and a marker name can legitimately appear
+    inside either as *data* (`Replace(Name, 'upper(x)', 'y')`). Doubled quotes
+    (`'it''s'`, the escape ThoughtSpot uses) read as adjacent literals, which
+    keeps the inner text quoted — conservative in the safe direction.
+    """
+    spans: list[tuple[int, int]] = []
+    quote: str | None = None
+    start = 0
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                spans.append((start, i + 1))
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+            start = i
+    if quote:                      # unterminated literal — treat to end of text
+        spans.append((start, len(text)))
+    return spans
+
+
+def _in_quotes(idx: int, spans: list[tuple[int, int]]) -> bool:
+    return any(a <= idx < b for a, b in spans)
+
+
+def rewrite_marker_calls(
+    text: str,
+    handlers: dict[str, Any],
+) -> tuple[str, set[str]]:
+    """Rewrite `marker(args...)` calls via `handlers[marker](args) -> str|None`.
+
+    The single call-rewriting scanner shared by the regex-pipeline converters
+    (qlik, powerbi). `handlers` is keyed on a LOWERCASE marker name — the
+    intermediate name a converter's function map produces for something that
+    needs an argument-aware rewrite rather than a rename.
+
+    Two properties make it safe to run over its own output:
+
+    * **Quote-aware.** A marker inside a string literal is data, not a call —
+      `Replace(Name, 'upper(x)', 'y')` must not have its literal rewritten, and
+      an emitted `sql_string_op('TRIM({0})', …)` template must not be re-read as
+      a `trim` call. Both the marker search and the paren walk skip literals.
+    * **Terminating.** A handler's output must not itself contain the marker as
+      a callable token (pass-through templates are UPPERCASE inside quotes;
+      compositions emit a different function name), so each rewrite strictly
+      reduces the marker count while nested occurrences still resolve on the
+      following pass.
+
+    Returns ``(rewritten_text, unresolved)``. A handler returning None (wrong
+    arity, or a shape it cannot express) leaves the call untouched, and **any
+    marker still callable in the final text is reported in `unresolved`** —
+    including after an unbalanced-paren bail-out or guard exhaustion. Callers
+    must surface `unresolved` as NEEDS REVIEW: the surviving text is a bare
+    call to a function ThoughtSpot does not have, so shipping it silently would
+    trade a loud import failure for a wrong formula (flag, don't downgrade).
+    """
+    if not handlers:
+        return text, set()
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_])(" + "|".join(
+            sorted((re.escape(k) for k in handlers), key=len, reverse=True))
+        + r")\s*\(")
+    search_from = 0
+    guard = 0
+    while guard < 200:
+        guard += 1
+        spans = _quoted_spans(text)
+        m = None
+        for candidate in pattern.finditer(text, search_from):
+            if not _in_quotes(candidate.start(), spans):
+                m = candidate
+                break
+        if not m:
+            break
+        name = m.group(1)
+        open_idx = m.end() - 1
+        close_idx = _close_paren(text, open_idx)
+        if close_idx < 0:
+            break                          # unbalanced — final sweep flags it
+        args = _split_top_level_args(text[open_idx + 1:close_idx])
+        replacement = handlers[name](args)
+        if replacement is None:
+            search_from = m.end()          # final sweep flags it
+            continue
+        text = text[:m.start()] + replacement + text[close_idx + 1:]
+        search_from = m.start()
+    # Final sweep: whatever is still a callable marker outside a literal was
+    # not translated, whether through wrong arity, unbalanced parens or guard
+    # exhaustion. Reporting it is what keeps the failure loud.
+    spans = _quoted_spans(text)
+    unresolved = {m.group(1) for m in pattern.finditer(text)
+                  if not _in_quotes(m.start(), spans)}
+    return text, unresolved
+
+
+def _passthrough_handler(op: str, template: str, arity: int, quote: str) -> Any:
+    def handler(args: list[str]) -> str | None:
+        if len(args) != arity:
+            return None
+        return f"{op}({quote}{template}{quote}, " + ", ".join(args) + ")"
+    return handler
+
+
+def wrap_passthrough_calls(
+    text: str,
+    templates: dict[str, tuple[str, str, int]],
+    quote: str = "'",
+) -> tuple[str, set[str]]:
+    """Rewrite `fn(args...)` into a ThoughtSpot `sql_*_op` pass-through.
+
+    BL-171: a converter that renames a source function to a ThoughtSpot name
+    which does not exist produces a formula rejected at import (error_code
+    14516). For the functions with no ThoughtSpot equivalent — `upper`,
+    `lower`, `trim`, `ltrim`, `rtrim`, `replace` (all live-disproved on
+    se-thoughtspot: 2026-06-13 for the first two, 2026-07-29/30 for the rest)
+    — the translation is a `sql_*_op` pass-through instead.
+
+    `templates` maps a LOWERCASE marker name to `(sql_op, sql_template,
+    arity)`, e.g. ``{"trim": ("sql_string_op", "TRIM({0})", 1)}``. A thin
+    wrapper over :func:`rewrite_marker_calls` — see there for the quoting and
+    termination guarantees, and for what `unresolved` obliges the caller to do.
+    """
+    return rewrite_marker_calls(
+        text,
+        {name: _passthrough_handler(op, template, arity, quote)
+         for name, (op, template, arity) in templates.items()},
+    )
 
 
 # ---------------------------------------------------------------------------

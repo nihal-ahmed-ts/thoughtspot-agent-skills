@@ -25,33 +25,131 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Optional
 
+from ts_cli.formula_common import rewrite_marker_calls, wrap_passthrough_calls
+
 # ---------------------------------------------------------------------------
 # Function-name map + translator
 # ---------------------------------------------------------------------------
 
+# Functions with NO ThoughtSpot equivalent: marker name (lowercase) ->
+# (sql_*_op, SQL template, arity). BL-171 — `upper`/`lower` were disproved
+# 2026-06-13 and `trim`/`ltrim`/`rtrim`/`replace` on 2026-07-29, all
+# re-verified 2026-07-30 on se-thoughtspot: each bare call is rejected with
+# `Search did not find "<fn> ("` (error_code 14516). FUNCTION_MAP maps the
+# Qlik name onto the marker; `_remap_functions` then rewrites the marker into
+# the pass-through, so the marker never reaches an emitted formula (asserted
+# by tests/test_qlik_functions.py::TestMapIntegrity).
+PASSTHROUGH_MAP: dict[str, tuple[str, str, int]] = {
+    "upper": ("sql_string_op", "UPPER({0})", 1),
+    "lower": ("sql_string_op", "LOWER({0})", 1),
+    "trim": ("sql_string_op", "TRIM({0})", 1),
+    "ltrim": ("sql_string_op", "LTRIM({0})", 1),
+    "rtrim": ("sql_string_op", "RTRIM({0})", 1),
+    "replace": ("sql_string_op", "REPLACE({0}, {1}, {2})", 3),
+}
+
+
+def _mid(args: list[str]) -> Optional[str]:
+    """Qlik Mid(str, start, n) -> ThoughtSpot substr, start decremented.
+
+    Qlik `Mid()` is **1-indexed**; ThoughtSpot `substr()` takes a
+    **ZERO-indexed** start (`thoughtspot-formula-patterns.md` String Functions
+    — the authoritative source per CLAUDE.md's precedence, and the offset the
+    Tableau converter's MID handler has always applied). A bare `mid`->`substr`
+    rename therefore imports cleanly and returns strings shifted by one
+    character — the valid-but-wrong class, which is worse than the bare
+    `mid ( )` it replaced: that at least failed loudly with error_code 14516.
+    """
+    if len(args) != 3:
+        return None
+    return f"substr({args[0]}, {args[1]} - 1, {args[2]})"
+
+
+def _index(args: list[str]) -> Optional[str]:
+    """Qlik Index(str, substr[, n]) -> ThoughtSpot strpos — 2 arguments only.
+
+    `strpos(x, sub)` returns the position of the **first** occurrence, which is
+    exactly Qlik `Index()` with its default `n=1`. The **nth-occurrence** form
+    (`n` >= 2) has no ThoughtSpot equivalent at all, and a bare rename passed
+    the third argument straight through as `strpos(x, sub, 2)` — a real function
+    with the wrong arity, so the translation reported success and the *import*
+    failed later — live-confirmed on se-thoughtspot 2026-07-30: `Function strpos
+    expects only 2 arguments.` (error_code 14516). Returning None here flags it
+    at translate time instead, which is where a reviewer can act on it.
+    """
+    if len(args) != 2:
+        return None
+    return f"strpos({args[0]}, {args[1]})"
+
+
+def _weekday(args: list[str]) -> Optional[str]:
+    """Qlik Weekday(date) -> ThoughtSpot day_number_of_week, origin shifted.
+
+    Qlik `Weekday()` returns a **number** with **0 = Monday**; ThoughtSpot
+    `day_of_week()` returns the day NAME (so the old mapping compared a name to
+    a number) and `day_number_of_week()` returns **1 = Monday**. Renaming alone
+    leaves every literal comparison off by one — `Weekday(d) = 5` would mean
+    Friday instead of Saturday — so the origin is shifted here.
+
+    Caveat: a Qlik app with a non-default `FirstWeekDay` numbers the days from a
+    different origin. That is app configuration the converter cannot see; the
+    shift above assumes Qlik's default. Documented on row D06.
+    """
+    if len(args) != 1:
+        return None
+    return f"(day_number_of_week({args[0]}) - 1)"
+
+
+# Functions needing an ARGUMENT-AWARE rewrite rather than a rename: marker
+# name -> handler(args) -> replacement or None (flagged for review). Same
+# marker mechanism as PASSTHROUGH_MAP; the handler emits native ThoughtSpot
+# functions rather than a sql_*_op pass-through.
+#
+# Both entries exist because a bare rename is *valid and wrong* — an index or
+# origin differs between the two platforms, which imports cleanly and returns
+# the wrong answer. That is the failure mode BL-171 was filed against.
+# `index` is here for a third reason: an arity the ThoughtSpot target cannot
+# express. A bare rename let the extra argument through into a real function
+# with the wrong arity, which reads as a successful translation and fails at
+# import — unflagged, so nobody sees it until then.
+COMPOSITION_MAP: dict[str, Any] = {
+    "mid": _mid, "weekday": _weekday, "index": _index,
+}
+
 # Qlik function name (lowercase) -> ThoughtSpot formula function.
-# None means "no equivalent" -> flagged for manual review.
+# None means "no equivalent" -> flagged for manual review. A value that is a
+# PASSTHROUGH_MAP key is an intermediate marker, not an emitted name.
+#
+# BL-171: every value here was audited end-to-end against
+# thoughtspot-formula-patterns.md and live-probed on se-thoughtspot
+# (2026-07-30). Do not add a value without checking it exists — the previous
+# map carried `len`, `mid`, `ceiling`, `power`, `log`, `day_of_month` and four
+# `date_trunc_*` names, none of which is a ThoughtSpot function.
 FUNCTION_MAP: dict[str, Optional[str]] = {
     # aggregation
     "sum": "sum", "avg": "average", "average": "average", "count": "count",
     "min": "min", "max": "max", "median": "median", "stdev": "stddev",
     "variance": "variance",
     # string
-    "left": "left", "right": "right", "mid": "mid", "len": "len",
+    "left": "left", "right": "right", "mid": "mid", "len": "strlen",
     "upper": "upper", "lower": "lower", "trim": "trim", "ltrim": "ltrim",
-    "rtrim": "rtrim", "index": "strpos", "concat": "concat",
+    "rtrim": "rtrim", "index": "index",
+    # Qlik Concat() aggregates values ACROSS rows (GROUP_CONCAT); ThoughtSpot
+    # concat() joins within one row (S14) — mapping the name produced a
+    # valid-but-wrong formula, so it is flagged instead (flag, don't downgrade).
+    "concat": None,
     "replace": "replace", "num": "to_double", "text": "to_string",
     "subfield": None,
     # date
-    "year": "year", "month": "month_number", "day": "day_of_month",
-    "weekday": "day_of_week", "quarter": "quarter_number", "today": "today",
+    "year": "year", "month": "month_number", "day": "day",
+    "weekday": "weekday", "quarter": "quarter_number", "today": "today",
     "now": "now", "addmonths": "add_months", "addyears": "add_years",
-    "monthstart": "date_trunc_month", "yearstart": "date_trunc_year",
-    "quarterstart": "date_trunc_quarter", "weekstart": "date_trunc_week",
+    "monthstart": "start_of_month", "yearstart": "start_of_year",
+    "quarterstart": "start_of_quarter", "weekstart": "start_of_week",
     "date": "to_date", "networkdays": None,
     # math
-    "round": "round", "floor": "floor", "ceil": "ceiling", "abs": "abs",
-    "sqrt": "sqrt", "pow": "power", "log": "log", "exp": "exp", "mod": "mod",
+    "round": "round", "floor": "floor", "ceil": "ceil", "abs": "abs",
+    "sqrt": "sqrt", "pow": "pow", "log": "ln", "exp": "exp", "mod": "mod",
     "rangesum": None, "mode": None,
 }
 
@@ -72,10 +170,13 @@ def translate(expr: str) -> tuple[str, bool, str]:
     if "{" in expr:
         return _set_analysis(expr)
 
-    # Count(DISTINCT X) -> unique_count(X)
+    # Count(DISTINCT X) -> `unique count(X)`. BL-171: the function name has a
+    # SPACE — `unique_count` (underscore) does not exist and is rejected with
+    # error_code 14516 (live-verified 2026-07-30, se-thoughtspot). Only the
+    # conditional variants carry an underscore (`unique_count_if`).
     m = re.match(r"(?i)^count\(\s*distinct\s+(.+?)\)$", expr)
     if m:
-        return f"unique_count({m.group(1).strip()})", False, ""
+        return f"unique count({m.group(1).strip()})", False, ""
 
     # If(cond, t, f) -> if (cond) then t else f
     if re.match(r"(?i)^if\s*\(", expr):
@@ -94,46 +195,13 @@ def translate(expr: str) -> tuple[str, bool, str]:
 
 _FUNC_CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
-# ThoughtSpot has no native upper()/lower() in formula context — push them to
-# the warehouse via sql_string_op (same pattern the Tableau converter uses).
-# FUNCTION_MAP keeps upper/lower "known" (so they are never flagged as unmapped);
-# _wrap_string_ops rewrites the emitted upper(...)/lower(...) into sql_string_op.
-_STRING_OP = {"upper": "UPPER", "lower": "LOWER"}
-_STROP_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(upper|lower)\s*\(")
-
-
-def _wrap_string_ops(text: str) -> str:
-    """Rewrite bare upper(x)/lower(x) into sql_string_op('UPPER({0})', x)."""
-    while True:
-        m = _STROP_TOKEN.search(text)
-        if not m:
-            return text
-        fn = m.group(1)
-        open_idx = m.end() - 1
-        depth, in_str, i = 0, None, open_idx
-        while i < len(text):
-            ch = text[i]
-            if in_str:
-                if ch == in_str:
-                    in_str = None
-            elif ch in "'\"":
-                in_str = ch
-            elif ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        if depth != 0:
-            return text  # unbalanced parens; leave as-is rather than corrupt
-        inner = text[open_idx + 1:i].strip()
-        replacement = f"sql_string_op('{_STRING_OP[fn]}({{0}})', {inner})"
-        text = text[:m.start()] + replacement + text[i + 1:]
-
 
 def _remap_functions(expr: str) -> tuple[str, set[str]]:
     unknown: set[str] = set()
+    # marker name -> the spelling the source expression actually used, so a
+    # flag reads "LTrim" (what the author wrote) rather than a reconstructed
+    # "Ltrim" that appears nowhere in their app.
+    origin: dict[str, str] = {}
 
     def repl(m: re.Match) -> str:
         name = m.group(1)
@@ -143,13 +211,23 @@ def _remap_functions(expr: str) -> tuple[str, set[str]]:
             if ts is None:
                 unknown.add(name)
                 return f"{name}("        # leave as-is, flagged
+            if ts in PASSTHROUGH_MAP or ts in COMPOSITION_MAP:
+                origin[ts] = name
             return f"{ts}("
         unknown.add(name)
         return f"{name}("
 
     out = _FUNC_CALL.sub(repl, expr)
     out = out.replace("<>", "!=").replace("&", "+")
-    out = _wrap_string_ops(out)
+    # BL-171: rewrite the no-equivalent markers into sql_*_op pass-throughs,
+    # then the argument-aware compositions. An unresolved marker (wrong arity,
+    # unbalanced parens) is flagged rather than emitted — a bare trim/replace
+    # call is rejected at import with error_code 14516, and a bare `mid` does
+    # not exist at all.
+    out, unresolved = wrap_passthrough_calls(out, PASSTHROUGH_MAP)
+    out, unresolved_comp = rewrite_marker_calls(out, COMPOSITION_MAP)
+    unknown |= {origin.get(name, name)
+                for name in (unresolved | unresolved_comp)}
     return out, unknown
 
 
@@ -210,17 +288,26 @@ def _split_top_level(s: str) -> list[str]:
     return [p.strip() for p in parts]
 
 
+def _agg_fn(name: str) -> str:
+    """The ThoughtSpot aggregation for a Qlik aggregation name.
+
+    Falls back to `sum` both for an unmapped name and for one mapped to None
+    (no equivalent) — the previous `.get(name, "sum")` returned None for the
+    latter and emitted a literal `None(...)` into the formula."""
+    return FUNCTION_MAP.get(name.lower()) or "sum"
+
+
 def _set_analysis(expr: str) -> tuple[str, bool, str]:
     # Pattern 1: {1} -> ignore all selections (total).
     m = re.match(r"(?i)^(\w+)\(\s*\{1\}\s*(.+?)\)$", expr)
     if m:
-        agg = FUNCTION_MAP.get(m.group(1).lower(), "sum")
+        agg = _agg_fn(m.group(1))
         return f"group_aggregate({agg}({m.group(2).strip()}), {{}}, {{}})", False, ""
 
     # Pattern 2/3/4: {<Field={...}>} (equals / exclude / union).
     m = re.match(r"(?i)^(\w+)\(\s*\{<\s*([\w \[\]]+?)\s*(-?=)\s*(.+?)\s*>\}\s*(.+?)\)$", expr)
     if m:
-        agg_fn = FUNCTION_MAP.get(m.group(1).lower(), "sum")
+        agg_fn = _agg_fn(m.group(1))
         field = m.group(2).strip().strip("[]")
         op = m.group(3)
         raw_vals = m.group(4)
