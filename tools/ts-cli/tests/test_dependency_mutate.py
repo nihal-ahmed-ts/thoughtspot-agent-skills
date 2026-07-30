@@ -16,6 +16,8 @@ inputs are never mutated, even though the low-level helpers they call mutate in 
 """
 from __future__ import annotations
 
+import pytest
+
 from ts_cli.dependency.mutate import (
     apply_remove,
     apply_repoint,
@@ -53,6 +55,28 @@ class TestSanitizeSearchQuery:
         result = sanitize_search_query("  [Revenue]  by  [Region]  ", ["Revenue"])
         assert "[Revenue]" not in result
         assert "[Region]" in result
+
+    def test_consumes_the_tokens_bucket_modifier(self):
+        """A real View query says `[date].daily` / `[formula_PMPM month].monthly`.
+        Stripping only the bracketed half strands a bare `.monthly` (observed on
+        `OptumRx View`'s live export) — the modifier is meaningless without its column.
+        """
+        assert sanitize_search_query("[date].monthly [Brand]", ["date"]) == "[Brand]"
+        assert sanitize_search_query("[date].daily by [Region]", ["date"]) == "by [Region]"
+
+    def test_consumes_chained_bucket_modifiers(self):
+        assert sanitize_search_query("[date].monthly.growth [Brand]", ["date"]) == "[Brand]"
+
+    def test_leaves_a_separate_column_token_named_like_a_modifier(self):
+        """The modifier must follow the `]` immediately. A standalone `[monthly]` is a
+        column reference in its own right and must survive.
+        """
+        result = sanitize_search_query("[date].monthly [monthly]", ["date"])
+        assert result == "[monthly]"
+
+    def test_does_not_consume_a_modifier_after_an_unrelated_token(self):
+        result = sanitize_search_query("[Revenue] [date].monthly", ["Revenue"])
+        assert result == "[date].monthly"
 
     def test_empty_query(self):
         assert sanitize_search_query("", ["Revenue"]) == ""
@@ -240,16 +264,36 @@ class TestRemoveColumnsFromAnswer:
 # ---------------------------------------------------------------------------
 
 class TestRemoveColumnsFromView:
+    """Fixtures here are CENSUS-SHAPED (BL-191).
+
+    The 2026-07-30 TML property census (`docs/reviews/2026-07-30-tml-census.md`, all 42
+    `AGGR_WORKSHEET` objects on se-thoughtspot) found that a real `view_columns[]` entry
+    carries exactly three keys — `name`, `search_output_column`, `properties` —
+    `search_output_column` in 265 of 265 columns and `column_id` in **zero**. It also
+    found no `::` in any `search_output_column` value. These fixtures previously used
+    `{"name": ..., "column_id": "Orders_1::Revenue"}`, a shape that does not occur, so
+    they passed *because* they matched the same wrong model the code did.
+    """
+
     def _sample_view(self):
         return {
             "view_columns": [
-                {"name": "Revenue", "column_id": "Orders_1::Revenue"},
-                {"name": "Region", "column_id": "Region_1::Region"},
+                # search_output_column == name — 256 of 265 observed columns.
+                {"name": "Region", "search_output_column": "Region",
+                 "properties": {"column_type": "ATTRIBUTE", "index_type": "DONT_INDEX"}},
+                # Aggregation decoration — the 9 of 265 where the two fields diverge
+                # (census: `name: LINEAMOUNT` / `search_output_column: Total LINEAMOUNT`).
+                {"name": "Revenue", "search_output_column": "Total Revenue",
+                 "properties": {"column_type": "MEASURE", "aggregation": "SUM"}},
             ],
             "search_query": "[Revenue] by [Region]",
             "joins": [
-                {"name": "Orders_Region_join", "on": "[Revenue] = [Orders_1::Revenue]"},
-                {"name": "Safe_join", "on": "[Region] = [Region_1::Region]"},
+                {"id": "Orders_Region_join", "name": "Orders_Region_join",
+                 "source": "Orders", "destination": "Region",
+                 "on": "[Revenue] = [Orders_1::Revenue]"},
+                {"id": "Safe_join", "name": "Safe_join",
+                 "source": "Region", "destination": "Region",
+                 "on": "[Region] = [Region_1::Region]"},
             ],
         }
 
@@ -282,14 +326,323 @@ class TestRemoveColumnsFromView:
         assert result is original
         assert len(original["view_columns"]) == 1
 
-    def test_removes_formula_and_its_view_column(self):
+    def test_removes_column_matched_inside_search_output_decoration(self):
+        """The defect BL-191 documents: an ALIASED View column whose bare name does not
+        match, but whose `search_output_column` carries the removed column inside an
+        aggregation decoration (census: `name: row_count` /
+        `search_output_column: Average num_rows`). The old code checked
+        `col in c.get("column_id", "")`, which on a real View is always `col in ""` —
+        never true — so the entry survived and left a dangling reference.
+        """
         section = {
-            "view_columns": [{"name": "Margin", "column_id": "f1"}],
-            "formulas": [{"id": "f1", "name": "Margin", "expr": "[Revenue] - [Cost]"}],
+            "view_columns": [
+                {"name": "row_count", "search_output_column": "Average num_rows",
+                 "properties": {"column_type": "MEASURE", "aggregation": "AVERAGE"}},
+                {"name": "Region", "search_output_column": "Region",
+                 "properties": {"column_type": "ATTRIBUTE"}},
+            ],
+        }
+        result = remove_columns_from_view(section, ["num_rows"])
+        assert [c["name"] for c in result["view_columns"]] == ["Region"]
+
+    # -- Over-removal floors. `search_output_column` is a human label WITH SPACES, so
+    # every containment rule — including one anchored to the end of the string — matches
+    # a trailing word-SUBSEQUENCE of an unrelated column. The matcher is whole-value
+    # equality against enumerated decorations precisely to refuse these. Over-removal
+    # emits VALID TML, so no import gate or linter catches it.
+
+    @pytest.mark.parametrize("value, removed", [
+        # The headline case: `Ship Date` is an ORDINARY UNDECORATED column. `Ship` is not
+        # an aggregation prefix, so `Ship Date` is not a decorated form of `Date`.
+        ("Ship Date", "Date"),
+        # Decorated, but the decoration wraps a DIFFERENT column.
+        ("Month(Order Date)", "Date"),
+        ("Total Line Unit Cost", "Cost"),
+        ("Total Unit Cost", "Cost"),
+        # A real census value: the column inside `Growth of ` is `Total sales`, not `sales`.
+        ("Growth of Total sales", "sales"),
+        # Trailing-extension floor.
+        ("Average num_rows_pct", "num_rows"),
+        # Leading-extension floor: the prefix must be a RECOGNISED token, and the rest
+        # must equal the column exactly — `rows` is not `num_rows`.
+        ("Average num_rows", "rows"),
+        # An unrecognised parenthesised head is not a bucket, so nothing is unwrapped.
+        ("Truncate(Order Date)", "Order Date"),
+        # Legacy `column_id` shape must still refuse a longer sibling.
+        ("DM_CATEGORY::CATEGORY_NAME_FULL", "CATEGORY_NAME"),
+    ])
+    def test_does_not_over_remove(self, value, removed):
+        section = {"view_columns": [{"name": "kept", "search_output_column": value}]}
+        result = remove_columns_from_view(section, [removed])
+        assert len(result["view_columns"]) == 1, \
+            f"removing {removed!r} wrongly deleted the column labelled {value!r}"
+
+    def test_undecorated_column_named_like_a_decoration_survives(self):
+        """`Total sales` is a real census column whose `name == search_output_column`.
+        Decoration-stripping would read it as `Total ` + `sales` and delete it when a
+        coexisting `sales` column is removed. `_view_column_targeted` only strips
+        decoration when `name != search_output_column` — divergence is the platform's own
+        signal that the label was generated rather than authored.
+        """
+        section = {
+            "view_columns": [
+                {"name": "Total sales", "search_output_column": "Total sales",
+                 "properties": {"column_type": "MEASURE"}},
+                {"name": "sales", "search_output_column": "sales",
+                 "properties": {"column_type": "MEASURE"}},
+            ],
+        }
+        result = remove_columns_from_view(section, ["sales"])
+        assert [c["name"] for c in result["view_columns"]] == ["Total sales"]
+
+    def test_divergent_entry_still_strips_decoration(self):
+        """The other side of the gate: when the two fields DIVERGE the label is generated,
+        so decoration is stripped — which is what all 9 real decorated entries rely on.
+        """
+        section = {
+            "view_columns": [
+                {"name": "sales rollup", "search_output_column": "Total sales",
+                 "properties": {"column_type": "MEASURE"}},
+            ],
+        }
+        result = remove_columns_from_view(section, ["sales"])
+        assert result["view_columns"] == []
+
+    def test_gate_does_not_break_formula_surfacing(self):
+        """A census formula column has `name == search_output_column` (`prev_year` /
+        `prev_year`), so the gate blocks decoration-stripping on it — but the formula
+        binding is `search_output_column == formulas[].name`, the EXACT branch, which the
+        gate does not touch.
+        """
+        section = {
+            "view_columns": [
+                {"name": "prev_year", "search_output_column": "prev_year",
+                 "properties": {"column_type": "MEASURE", "aggregation": "MOVING_SUM"}},
+            ],
+            "formulas": [{"id": "formula_prev_year", "name": "prev_year",
+                          "expr": "sum ( [sales] )"}],
+        }
+        result = remove_columns_from_view(section, ["sales"])
+        assert result["formulas"] == []
+        assert result["view_columns"] == []
+
+    def test_gate_under_removes_a_self_named_decorated_column_by_design(self):
+        """The gate's measured cost, pinned so it is a documented trade and not a surprise.
+
+        Real corpus case (`Sales with MONTH 2`): a column whose `name` AND
+        `search_output_column` are both `Month(YearMonth)` — renamed by the user to match
+        its own decorated label — surfacing formula `YearMonth`. The gate keeps it, so one
+        dangling reference survives. Accepted deliberately: that fails LOUDLY at import
+        (`tml_lint` I13 / error_code 14516), whereas the `Total sales` over-removal the gate
+        prevents emits valid TML silently. Recovering it is BL-198's scope.
+        """
+        section = {
+            "view_columns": [
+                {"name": "Month(YearMonth)", "search_output_column": "Month(YearMonth)"},
+                {"name": "年月日", "search_output_column": "年月日"},
+            ],
+            "formulas": [{"id": "formula_YearMonth", "name": "YearMonth",
+                          "expr": 'to_date ( to_string ( [年月日] , "%Y-%m" ) , "%Y-%m" )'}],
+        }
+        result = remove_columns_from_view(section, ["年月日"])
+        assert result["formulas"] == [], "the formula itself must still go"
+        assert [c["name"] for c in result["view_columns"]] == ["Month(YearMonth)"], \
+            "known BL-198 residual: gate keeps a self-named decorated formula column"
+
+    def test_ordinary_view_loses_only_the_named_column(self):
+        """End-to-end statement of the regression: a plain View of four columns, three of
+        which contain the word `Date`. Removing `Date` must take exactly one.
+        """
+        section = {
+            "view_columns": [
+                {"name": "Date", "search_output_column": "Date"},
+                {"name": "Ship Date", "search_output_column": "Ship Date"},
+                {"name": "Order Date", "search_output_column": "Month(Order Date)"},
+                {"name": "Revenue", "search_output_column": "Total Revenue"},
+            ],
+        }
+        result = remove_columns_from_view(section, ["Date"])
+        assert [c["name"] for c in result["view_columns"]] == [
+            "Ship Date", "Order Date", "Revenue"]
+
+    def test_accepts_every_decoration_form_observed_in_the_census(self):
+        """All 9 real `name` != `search_output_column` pairs from the 2026-07-30 census,
+        each removed by the column its decoration wraps. Guards the matcher against
+        being tightened past the evidence.
+        """
+        cases = [
+            ("Total LINEAMOUNT", "LINEAMOUNT"),
+            ("Average num_rows", "num_rows"),
+            ("Total Line Unit Cost", "Line Unit Cost"),
+            ("Total Input Column - Budgets", "Input Column - Budgets"),
+            ("Growth of Total sales", "Total sales"),
+            ("Month(YM)", "YM"),
+            ("Month(PMPM month)", "PMPM month"),
+            ("Day(time)", "time"),
+            ("URL", "URL"),
+        ]
+        for soc, col in cases:
+            section = {"view_columns": [{"name": "aliased", "search_output_column": soc}]}
+            result = remove_columns_from_view(section, [col])
+            assert result["view_columns"] == [], f"{soc!r} not matched by {col!r}"
+
+    def test_sanitizes_search_query_of_a_cascaded_formula_reference(self):
+        """A View references its formulas from `search_query` BY ID
+        (`[formula_PMPM month].monthly` — real, from `OptumRx View`). `search_query` is
+        sanitized before the formula cascade is known, so `_strip_view_formulas` has to
+        re-sanitize, or removing a column drops the formula and leaves the query naming
+        it: the same dangling reference by another route. The `.monthly` bucket modifier
+        goes with the token — it is meaningless without it.
+        """
+        section = {
+            "search_query": "[formula_PMPM month] [formula_PMPM month].monthly [Brand]",
+            "view_columns": [
+                {"name": "PMPM month", "search_output_column": "Month(PMPM month)",
+                 "properties": {"column_type": "ATTRIBUTE"}},
+            ],
+            "formulas": [
+                {"id": "formula_PMPM month", "name": "PMPM month",
+                 "expr": "start_of_month ( [Fill Date] )"},
+            ],
+        }
+        result = remove_columns_from_view(section, ["Fill Date"])
+        assert result["formulas"] == []
+        assert result["view_columns"] == []
+        assert "formula_PMPM month" not in result["search_query"]
+        assert ".monthly" not in result["search_query"]
+        assert result["search_query"] == "[Brand]"
+
+    def test_tolerates_legacy_column_id_on_input(self):
+        """Defensive compatibility. The census covered ONE cluster, so a legacy or
+        version-gated build emitting `column_id` cannot be ruled out (BL-190 tracks the
+        second-cluster re-run). `thoughtspot-view-tml.md` says: prefer
+        `search_output_column`, tolerate the old spelling on input.
+        """
+        section = {"view_columns": [{"name": "Rev", "column_id": "Orders_1::Revenue"}]}
+        result = remove_columns_from_view(section, ["Revenue"])
+        assert result["view_columns"] == []
+
+    def test_removes_formula_and_its_view_column(self):
+        """A formula-backed View column is bound by `search_output_column ==
+        formulas[].name` — NOT `column_id == formulas[].id`, which is what the old code
+        checked and which matched nothing on a real View. The formula was deleted and its
+        `view_columns[]` entry left behind: the dangling reference
+        `thoughtspot-view-tml.md`'s self-validation checklist forbids.
+        """
+        section = {
+            "view_columns": [
+                {"name": "Margin", "search_output_column": "Margin",
+                 "properties": {"column_type": "MEASURE"}},
+            ],
+            "formulas": [
+                {"id": "formula_Margin", "name": "Margin",
+                 "expr": "[Revenue] - [Cost]", "was_auto_generated": False},
+            ],
+        }
+        result = remove_columns_from_view(section, ["Cost"])
+        assert result["formulas"] == []
+        assert result["view_columns"] == [], "dangling formula column left behind"
+
+    def test_no_view_column_survives_a_removed_formula(self):
+        """The dangling-reference assertion stated directly: after stripping, no
+        `view_columns[]` entry may reference a `formulas[].name` that is gone.
+        """
+        section = {
+            "view_columns": [
+                {"name": "Margin", "search_output_column": "Margin",
+                 "properties": {"column_type": "MEASURE"}},
+                {"name": "Region", "search_output_column": "Region",
+                 "properties": {"column_type": "ATTRIBUTE"}},
+            ],
+            "formulas": [
+                {"id": "formula_Margin", "name": "Margin", "expr": "[Revenue] - [Cost]"},
+                {"id": "formula_Keep", "name": "Keep", "expr": "[Region]"},
+            ],
+        }
+        result = remove_columns_from_view(section, ["Cost"])
+        surviving = {f["name"] for f in result["formulas"]}
+        assert surviving == {"Keep"}
+        refs = {c["search_output_column"] for c in result["view_columns"]}
+        assert "Margin" not in refs
+        assert refs == {"Region"}
+
+    def test_removes_decorated_formula_view_column(self):
+        """A formula column's `search_output_column` can carry the same aggregation
+        decoration a physical column's does, so the formula-name match must be
+        decoration-aware too — `Total Margin` surfaces formula `Margin`.
+        """
+        section = {
+            "view_columns": [
+                {"name": "Margin", "search_output_column": "Total Margin",
+                 "properties": {"column_type": "MEASURE", "aggregation": "SUM"}},
+            ],
+            "formulas": [
+                {"id": "formula_Margin", "name": "Margin", "expr": "[Revenue] - [Cost]"},
+            ],
+        }
+        result = remove_columns_from_view(section, ["Cost"])
+        assert result["view_columns"] == []
+
+    def test_tolerates_legacy_formula_id_binding_on_input(self):
+        """The old `column_id == formulas[].id` binding is still honoured on input, for
+        the same reason `column_id` is: one cluster is not every build (BL-190).
+        """
+        section = {
+            "view_columns": [{"name": "Margin", "column_id": "formula_Margin"}],
+            "formulas": [
+                {"id": "formula_Margin", "name": "Margin", "expr": "[Revenue] - [Cost]"},
+            ],
         }
         result = remove_columns_from_view(section, ["Cost"])
         assert result["formulas"] == []
         assert result["view_columns"] == []
+
+    def test_non_ascii_column_names_keep_their_boundary(self):
+        """The boundary classes are Unicode-aware `\\w`, not `[A-Za-z0-9_]`. With the
+        ASCII class a non-ASCII name had no effective boundary and the match degraded to
+        a plain substring, so removing `前年` would have taken the census's real
+        `前年比区分` formula with it. CJK letters ARE `\\w`, so the boundary holds.
+        """
+        section = {
+            "view_columns": [
+                {"name": "前年比区分", "search_output_column": "前年比区分"},
+            ],
+            "formulas": [{"id": "formula_前年比区分", "name": "前年比区分",
+                          "expr": "if ( [前年比区分] > 0 ) then 1 else 0"}],
+            "joins": [{"name": "j", "on": "[前年比区分] = [other::前年比区分]"}],
+        }
+        result = remove_columns_from_view(section, ["前年"])
+        assert len(result["view_columns"]) == 1, "over-removed on a CJK substring"
+        assert len(result["formulas"]) == 1
+        assert len(result["joins"]) == 1
+
+    def test_non_ascii_column_name_still_removed_when_named_exactly(self):
+        section = {
+            "view_columns": [{"name": "前年比区分", "search_output_column": "Total 前年比区分"}],
+            "formulas": [{"id": "f", "name": "n", "expr": "sum ( [前年比区分] )"}],
+            "joins": [{"name": "j", "on": "[a::前年比区分] = [b::x]"}],
+        }
+        result = remove_columns_from_view(section, ["前年比区分"])
+        assert result["view_columns"] == []
+        assert result["formulas"] == []
+        assert result["joins"] == []
+
+    def test_formula_expr_match_is_whole_token(self):
+        """`expr` matching uses the module's whole-token matcher, so removing `Cost`
+        does not drag out a formula that only references `Cost_Center` (the
+        false-positive class `_references_column` was introduced for, open-items #24).
+        """
+        section = {
+            "view_columns": [
+                {"name": "Centre", "search_output_column": "Centre",
+                 "properties": {"column_type": "ATTRIBUTE"}},
+            ],
+            "formulas": [{"id": "formula_Centre", "name": "Centre",
+                          "expr": "[Cost_Center]"}],
+        }
+        result = remove_columns_from_view(section, ["Cost"])
+        assert len(result["formulas"]) == 1
+        assert len(result["view_columns"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +651,43 @@ class TestRemoveColumnsFromView:
 # ---------------------------------------------------------------------------
 
 class TestRemoveColumnsFromModelSection:
+    def test_non_ascii_column_names_keep_their_boundary(self):
+        """The Model path shares `_references_column`, so the Unicode-boundary fix reaches
+        it too — the changelog claims this, so it is asserted here and not only on the View
+        path. Under the old ASCII classes a non-ASCII name had no boundary and the match
+        degraded to a substring, taking `前年比区分` when `前年` was removed.
+        """
+        section = {
+            "columns": [
+                {"name": "前年比区分", "column_id": "DIM::前年比区分"},
+                {"name": "Margin", "formula_id": "f1"},
+            ],
+            "formulas": [{"id": "f1", "expr": "[DIM::前年比区分] * 2"}],
+            "model_tables": [{"joins": [{"on": "[A::前年比区分] = [B::前年比区分]"}]}],
+            "filters": [{"column": ["前年比区分"]}],
+        }
+        result = remove_columns_from_model_section(section, ["前年"])
+        assert len(result["columns"]) == 2, "over-removed on a CJK substring"
+        assert len(result["formulas"]) == 1
+        assert len(result["model_tables"][0]["joins"]) == 1
+        assert len(result["filters"]) == 1
+
+    def test_non_ascii_column_removed_when_named_exactly(self):
+        section = {
+            "columns": [
+                {"name": "前年比区分", "column_id": "DIM::前年比区分"},
+                {"name": "Margin", "formula_id": "f1"},
+            ],
+            "formulas": [{"id": "f1", "expr": "[DIM::前年比区分] * 2"}],
+            "model_tables": [{"joins": [{"on": "[A::前年比区分] = [B::x]"}]}],
+            "filters": [{"column": ["前年比区分"]}],
+        }
+        result = remove_columns_from_model_section(section, ["前年比区分"])
+        assert [c["name"] for c in result["columns"]] == []
+        assert result["formulas"] == []
+        assert result["model_tables"][0]["joins"] == []
+        assert result["filters"] == []
+
     def _sample_model(self):
         return {
             "columns": [
@@ -544,7 +934,14 @@ class TestRepointView:
     def test_column_gap_removed(self):
         section = {
             "tables": [{"fqn": "src-guid", "name": "Old"}],
-            "view_columns": [{"name": "Legacy Col", "column_id": "Legacy Col"}],
+            # Census shape, and deliberately ALIAS-DIVERGENT — `name` is not the removed
+            # column, so this can only pass via `search_output_column`. BL-191 named this
+            # fixture as part of the defect; re-shaping it alone was not enough, it also
+            # had to discriminate.
+            "view_columns": [
+                {"name": "Legacy Alias", "search_output_column": "Total Legacy Col",
+                 "properties": {"column_type": "MEASURE", "aggregation": "SUM"}},
+            ],
         }
         result = repoint_view(section, "src-guid", "tgt-guid", "New Model", ["Legacy Col"])
         assert result["view_columns"] == []
@@ -645,8 +1042,14 @@ class TestApplyRemoveDispatcher:
         assert result["answer"]["answer_columns"] == []
 
     def test_view_doc(self):
-        doc = {"view": {"view_columns": [{"name": "Revenue", "column_id": "Revenue"}]}}
-        result = apply_remove(doc, ["Revenue"])
+        # Census shape, ALIAS-DIVERGENT so the dispatcher's view path can only pass via
+        # `search_output_column` — the census's own `row_count`/`Average num_rows` pair.
+        # BL-191 named this fixture as part of the defect.
+        doc = {"view": {"view_columns": [
+            {"name": "row_count", "search_output_column": "Average num_rows",
+             "properties": {"column_type": "MEASURE", "aggregation": "AVERAGE"}},
+        ]}}
+        result = apply_remove(doc, ["num_rows"])
         assert result["view"]["view_columns"] == []
 
     def test_model_doc(self):

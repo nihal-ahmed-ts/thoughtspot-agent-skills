@@ -64,7 +64,7 @@ are roughly ordered by value÷effort.
 | Item | Summary | Target |
 |---|---|---|
 | BL-178 | from-Snowflake identifier resolution: 3-defect regression, every metric formula dangles | immediate |
-| BL-191 | `dependency/mutate.py` reads Views through `column_id` (0/265 in the wild) — silent dangling refs | next dependency change |
+| ~~BL-191~~ | ~~`dependency/mutate.py` reads Views through `column_id` (0/265 in the wild) — silent dangling refs~~ | DONE (2026-07-31) |
 | BL-183 | Validator: dangling `[formula_X]` refs in `ts tml lint` + CA-JSON table refs | with BL-178 |
 | BL-174 | from-Databricks forward leg: `INNER` join type, dropped `format:`, stamped `cardinality:` | next DBX pass |
 | BL-180 | from-Snowflake translator ignores `\|\|`→`concat` and NULL-preserving division | next formula pass |
@@ -6676,7 +6676,7 @@ safe to run at any time.
 
 ---
 
-## BL-191 -- `dependency/mutate.py` reads Views through `column_id`, a field real View TML does not have `Tier 1`
+## BL-191 -- `dependency/mutate.py` reads Views through `column_id`, a field real View TML does not have `Tier 1` -- **RESOLVED 2026-07-31**
 
 **Filed:** 2026-07-30.
 **Source:** PR #420 review. That PR corrected `agents/shared/schemas/thoughtspot-view-tml.md` after a
@@ -6685,10 +6685,162 @@ safe to run at any time.
 the old field", which the reviewer disproved: `dependency/mutate.py` depends on it in four places.
 **Affects:** `tools/ts-cli/ts_cli/dependency/mutate.py` (`_strip_view_columns` ~:226-235,
 `_strip_view_formulas` ~:238-251), `tools/ts-cli/tests/test_dependency_mutate.py` (~:287, ~:648).
-**Status:** OPEN -- **ready to fix.** Diagnosed and located; deliberately not fixed in #420, which
-was documentation-only.
+**Status:** **RESOLVED 2026-07-31** -- fixed in ts-cli **v0.127.1**
+(`fix/bl-191-view-paths`, PR #427). Per defect:
 
-**The defect, in four parts.**
+1. **Prefix branch never fired** -- `_strip_view_columns` now matches
+   `_view_column_ref(c)` (`search_output_column`, falling back to `column_id`) via
+   `_decorated_ref_matches`: **whole-value equality against an enumerated decoration
+   vocabulary** (`_AGG_PREFIXES` / `_DATE_BUCKETS`), never a search inside the value. So an
+   aggregation or bucket decoration is caught: **re-verified live that 4 of the 9 decorated
+   columns in the corpus** (`row_count`/`Average num_rows`, `date`/`Day(time)`,
+   `Number of URL`/`URL`, `Growth of sales`/`Growth of Total sales`) name a column the
+   old exact-`name` fallback could not see.
+2. **`_strip_view_formulas`' second half was dead** -- a removed formula's **display
+   name** is now passed back through `_view_column_targeted`, so the surfacing column
+   goes with it. Measured over all 42 real Views: the old `column_id == formulas[].id`
+   binding bound **0 of 46** formulas, and replaying a formula-triggering strip left
+   **101 dangling references** where the fixed code leaves **0**.
+3. **Docstrings asserted the disproved shape** -- both rewritten from the census
+   (`docs/reviews/2026-07-30-tml-census.md`, cited by tracked path); the `::`-prefix
+   claim is gone. `agents/cli/ts-dependency-manager/SKILL.md`'s troubleshooting row and
+   `references/dependency-types.md`'s View row + new note were carrying the same claim
+   and are corrected too.
+4. **The two View readers disagreed** -- `_references_column` was moved into a shared
+   matcher section used by BOTH the View and Model paths. `expr`/join-`on` matching moved
+   to it as well, so those fields are whole-token throughout (removing `Cost` no longer
+   drags out a formula on `[Cost_Center]`), and its boundary classes became Unicode-aware
+   `\w` -- with the old ASCII class a non-ASCII name had no boundary at all and the match
+   degraded to a substring, so removing `前年` would have taken the census's real
+   `前年比区分`. That is **a pre-existing bug on the Model path too**, fixed here because
+   the View path now shares the function. The split now mirrors `migrate/rewrite.py`'s own:
+   `_references_column` for **bracketed reference** fields (its `substitute_bracketed`),
+   `_decorated_ref_matches` for the **decorated label** field `search_output_column` (its
+   `substitute_decorated`).
+
+**Found by review of this fix, and fixed in the same PR** (both confirmed against live
+exports before changing anything):
+
+5. **The first cut re-created the silent-destructive class in the opposite direction.**
+   Binding `search_output_column` by *containment* over-removes, because the value is a
+   human label *with spaces* -- and an end-anchored containment rule is not enough, because
+   it still matches a trailing word-**subsequence** of an unrelated column: removing `Date`
+   took `Ship Date` (an ordinary UNDECORATED column, which `main` protected by exact-name
+   match) and `Month(Order Date)`; `Cost` took `Total Line Unit Cost`; `sales` took the real
+   census value `Growth of Total sales`. A View of `{Date, Ship Date, Order Date, Revenue}`
+   lost **three of four** columns on remove-`Date`. Over-removal emits **valid TML**, so no
+   import gate or linter catches it -- silent, exactly the failure mode BL-191 was filed
+   for. Corpus-measured on real data, the first cut over-removed in **2** places
+   (`Growth of Total sales` for `sales`; `Total Line Unit Cost` for `Unit Cost`).
+
+   Redesigned to **whole-value equality against an enumerated vocabulary**: `value == col`,
+   or `value == f"{prefix} {col}"` for a recognised aggregation/growth prefix, or
+   `value == f"{bucket}({col})"` for a recognised date bucket. No search, ever. The
+   vocabulary is derived from the corpus (`SUM`->`Total`, `AVERAGE`->`Average`,
+   `COUNT`->`Number of`, plus `Growth of` and the `Month(`/`Day(` buckets) and extended with
+   the display forms of the aggregations `thoughtspot-view-tml.md` documents. Composite
+   prefixes are deliberately excluded -- "Growth of Total" would strip two levels and make
+   `sales` match `Growth of Total sales` again -- so stripping is **one level only**.
+
+   The structural reason this shape is required, and not just preferred:
+   `substitute_decorated` is a *substitution* and can lean on a longest-match-first
+   tiebreak (`rewrite.py:108-112`), so when both `Order` and `Order Date` are mapped the
+   longer wins. A boolean *deletion* predicate is asked about one column at a time, in
+   isolation, with no view of the others -- it has no tiebreak available, so enumerated
+   equality is the only safe shape. The blast radius differs too: an over-matched rename is
+   visible and reversible, an over-matched delete is neither.
+
+   **And the equality redesign had its own over-removal residual, closed by a second gate.**
+   `Total sales` is a real census column whose `name == search_output_column`; stripping the
+   `Total ` prefix reads it as a decorated `sales` and would delete it whenever a coexisting
+   `sales` column is removed. `_view_column_targeted` therefore only strips decoration when
+   **`name != search_output_column`** -- divergence is the platform's own signal that the
+   label was generated rather than authored, and all 9 real decorated entries diverge by
+   definition. The gate does not touch the formula-surfacing path, which binds on exact
+   equality (`search_output_column == formulas[].name`). It costs only the case where a user
+   has renamed a View column to exactly match its own decorated label, which then
+   under-removes -- the loud direction.
+
+   Residual, stated: a decoration outside the vocabulary (an unseen bucket, a trailing suffix
+   like `Total Revenue (USD)`, or a composed label whose base column is removed) will not
+   match, so the column is left in place -- the safe direction, since a dangling reference is
+   rejected loudly at import. The vocabulary's provenance is split in the code between the
+   **4 census-observed** prefixes and the rest, which are **inferred** display spellings of
+   the documented `aggregation` enum values (the schema documents the enum, not its labels);
+   `SQL_INT_AGGREGATE_OP` has no prefix form and is unmodelled.
+6. **`search_query` still named the cascaded-away formula.** `_strip_view_search_query`
+   runs before the formula cascade is known, so it cannot see a formula that column
+   removal *cascades* into -- and a View references its formulas from the search string by
+   id. `OptumRx View`'s real query begins `[formula_PMPM month] [formula_PMPM month].monthly`;
+   removing `Fill Date` dropped that formula and left the query naming it, the same
+   dangling reference by another route. `_strip_view_formulas` now re-sanitizes against the
+   removed formulas' ids and names. Corpus-measured: **94 cases** with the old code, **0**
+   with the fix. `sanitize_search_query` also now consumes a token's trailing bucket
+   modifier, because stripping only the bracketed half stranded a bare `.monthly` at the
+   front of that same real query.
+
+**Deliberately NOT fixed here, filed instead** (both surfaced by the same corpus sweep;
+neither is a BL-191 defect and both predate it):
+
+- **BL-197** -- `sanitize_search_query` cannot see a qualified `[table_path::col]` token,
+  so the "mandatory" sanitizer no-ops on exactly the real Views that use that form.
+- **BL-198** -- View formula removal does not cascade **transitively**: a surviving formula
+  is left referencing a deleted one (**48 cases** across 6+ real Views), which
+  `tml_lint`'s I13 gate says fails the import with `error_code 14516`.
+
+**Tolerate-old-on-input:** `column_id`, and the `column_id == formulas[].id` binding,
+are still read as fallbacks -- the census is one cluster, and **BL-190** tracks the
+second-cluster re-run. This follows `thoughtspot-view-tml.md`'s stated policy.
+
+**Tests:** both mis-shaped fixtures re-cut from census shapes FIRST, before any fix. Not
+enough on its own -- re-shaping them left them still *passing* against the old code, so
+they were also made ALIAS-DIVERGENT (`name` is not the removed column), which is what
+makes them discriminate. **16 tests now fail against the pre-fix implementation**, and +29
+new cases cover the alias-divergent decoration, both false-positive floors (leading and
+trailing boundary), all 9 census decoration forms, the dangling-reference assertion, a
+decorated formula surfacing, the cascaded `search_query` reference, and both tolerated
+legacy bindings, the decoration-gate trio, and the Model path's non-ASCII boundary.
+3971 -> 4001 tests.
+
+**Live read-side verification** (zero writes; mutation semantics cannot be
+`VALIDATE_ONLY`-checked, but the read side can). 3 Views freshly re-exported on 2026-07-31
+plus the census's 42, all read-only, replaying every strip in memory:
+
+| Claim | Measured |
+|---|---|
+| `view_columns[]` keys ever emitted | exactly `name` / `properties` / `search_output_column` |
+| `search_output_column` present | **265 / 265** |
+| `column_id` present | **0 / 265** |
+| `search_output_column` containing `::` | **0** |
+| decorated (`name` != `search_output_column`) | 9, of which **4** are the alias class the old `name` fallback could not see |
+| formula surfacing bound -- FIXED vs OLD | **33** view_columns vs **0** (of 46 formulas) |
+| dangling `view_columns[]` refs after a strip -- OLD vs FIXED | **101** vs **1** (the gate's documented cost -- see defect 5; loud at import, folded into BL-198) |
+| dangling `search_query` formula ids -- OLD vs FIXED | **94** vs **0** |
+| end-to-end strip fires | **42 / 42** Views |
+
+**Both failure directions were measured**, because 0 dangling references says nothing about
+over-removal -- an over-removal emits valid TML, so nothing downstream catches it. 305
+single-column removals replayed across the 42 Views, diffed against an oracle built by
+CONSTRUCTING each column's legal labels (so it cannot inherit the matcher's own bug):
+
+| Implementation | over-removals | under-removals |
+|---|--:|--:|
+| pre-BL-191 (`main`) | 0 | **10** |
+| first BL-191 cut (end-anchored containment) | **13** | 0 |
+| final (this PR) | **0** | **0** |
+
+Full-pipeline replay (`remove_columns_from_view` end to end, cascade-aware oracle):
+**0 over, 0 under**.
+
+**What that oracle does and does not prove.** It is independent of the *implementation* -- it
+constructs each column's legal labels rather than searching inside them -- but it shares the
+final cut's *specification*, so the `0/0` row is not self-validating. Its force is
+**discriminating**: the same oracle scores `main` at 10 under-removals and the first cut at 13
+over-removals, both of which it found without being told what to look for. Independent evidence
+that the spec itself is right comes from the 9 census forms (asserted individually) and the
+adversarial over-removal probes, not from this table.
+
+**The defect, in four parts** (as diagnosed; retained for the record).
 
 1. **`_strip_view_columns`' prefix branch never fires.** It filters on
    `any(col in c.get("column_id", "") for col in cols_to_remove)`. Real View columns have no
@@ -6723,20 +6875,32 @@ was documentation-only.
 pass *because* the fixture matches the wrong model. Any fix must re-fixture them from real exported
 shapes first, or the fix will look like a regression.
 
-**The fix.** Match on `search_output_column` (falling back to `name`), with decoration-aware
+**The fix.** ~~Match on `search_output_column` (falling back to `name`), with decoration-aware
 containment rather than a bare substring test -- reusing `rewrite.py`'s `_DECORATED_FIELDS`
-treatment rather than inventing a second matcher. Bind formula-backed columns by
+treatment rather than inventing a second matcher.~~ Bind formula-backed columns by
 `formulas[].name`, not `formulas[].id`. Correct both docstrings. Then re-fixture the two tests from
 census-observed shapes and add a case for the decorated form (`search_output_column: "Total X"`
 with `name: "X"`), which nothing currently covers.
+
+> **SUPERSEDED 2026-07-31 -- the prescription above is the design the fix round PROVED UNSAFE.**
+> "Decoration-aware containment" over-removes in real data, and reusing `_DECORATED_FIELDS`'
+> treatment is exactly what makes it do so: `search_output_column` is a human label *with
+> spaces*, so containment -- even anchored to the end of the string -- matches a trailing
+> word-subsequence of an *unrelated* column (`Date` takes `Ship Date`; `sales` takes the real
+> `Growth of Total sales`). `substitute_decorated` gets away with it only because a
+> substitution has a longest-match-first tiebreak, which a boolean deletion predicate does not.
+> The shipped design is **whole-value equality against an enumerated decoration vocabulary**,
+> gated on `name != search_output_column` -- see the RESOLVED block at the top of this entry
+> (defect 5) for the full reasoning and the 0/0 corpus measurement. This paragraph is retained
+> only as the record of what was originally prescribed.
 
 **Why Tier 1.** Unlike BL-189 (which fails loudly with a `TypeError`), this one **fails silently
 and leaves a broken object**: a `ts-dependency-manager` run over a View emits TML that imports and
 then carries a dangling column reference. Silent + destructive + already shipped puts it above the
 crash.
 
-**Target:** next `tools/ts-cli/` dependency-engine change. Needs a version bump in both
-`__init__.py` and `pyproject.toml` per `.claude/rules/ts-cli.md`.
+~~**Target:** next `tools/ts-cli/` dependency-engine change.~~ Done -- ts-cli v0.127.1,
+version bumped in both `__init__.py` and `pyproject.toml` per `.claude/rules/ts-cli.md`.
 
 ---
 
@@ -7081,3 +7245,122 @@ ours:
    before adopting.
 
 **Target:** opportunistic — next time `.claude/rules/branching.md` or the hook is touched.
+
+---
+
+## BL-197 -- `sanitize_search_query` cannot see a QUALIFIED `[table_path::column]` token, so the "mandatory" sanitizer silently no-ops on real Views `Tier 2`
+
+**Filed:** 2026-07-31.
+**Source:** review of the BL-191 fix (PR #427).
+**Affects:** `tools/ts-cli/ts_cli/dependency/mutate.py` `sanitize_search_query` (~:66) --
+and therefore all three of its callers: `_strip_answer_search_query`,
+`_strip_view_search_query`, `_strip_answer_cohorts`.
+**Status:** OPEN -- diagnosed, located, and reproduced against real exports. Deliberately
+NOT fixed in #427: it is a shared sanitizer on the Answer/View/cohort paths, the fix needs
+its own live-import verification, and #427 was scoped to the View *binding*.
+
+**The defect.** The regex is `\s*\[<col>\]\s*` -- the BARE bracket form only. Real
+`search_query` values also use the **qualified** form, which the 2026-07-30 census
+observed directly:
+
+```
+[TS: External Table Info_1::connection_id] ... sum [TS: Daily Row Count_1::row_count] ...
+```
+
+Removing the base column `row_count` leaves `[TS: Daily Row Count_1::row_count]` in the
+query verbatim. Since ThoughtSpot rejects the import of any Answer/View whose
+`search_query` still names a column that no longer exists (open-items #3 -- the reason the
+function's own docstring calls it *mandatory*), the sanitizer's contract is not met on
+exactly the documents it matters most for.
+
+**Why it survived.** `ts-dependency-manager/SKILL.md`'s troubleshooting table already tells
+the operator to *"check for bracket-format variants like `[TABLE::col]` and strip
+manually"* -- the gap was known and documented as a manual step, which is how it stayed a
+gap. Every unit test uses the bare form.
+
+**The fix.** Match the qualified form as well -- a bracket token whose contents are
+`<anything>::<col>` as well as `<col>` -- reusing the whole-token discipline already in the
+module rather than a second regex dialect. `migrate/rewrite.py` solved the same problem for
+the rename direction with `substitute_bracketed` + `_QUALIFIED_RE`; that is the pattern to
+mirror. Note `#427` already extended the regex to consume a trailing bucket modifier
+(`[date].monthly`), so the token grammar is in one place.
+
+**Testing.** Unit tests for both forms on all three call sites, plus the combination
+(`[TBL_1::col].monthly`). Then a live import of a real View whose `search_query` carries a
+qualified token, since this class of change is only trustworthy against the actual parser.
+
+**Target:** next `tools/ts-cli/` dependency-engine change. Needs a version bump in both
+`__init__.py` and `pyproject.toml` per `.claude/rules/ts-cli.md`.
+
+---
+
+## BL-198 -- View formula removal does not cascade TRANSITIVELY, so a surviving formula is left referencing a deleted one `Tier 2`
+
+**Filed:** 2026-07-31.
+**Source:** review of the BL-191 fix (PR #427); found by that PR's own corpus sweep over
+all 42 real Views on se-thoughtspot.
+**Affects:** `tools/ts-cli/ts_cli/dependency/mutate.py` `_strip_view_formulas` (~:340).
+Check `remove_columns_from_model_section` at the same time -- it documents that it
+*"cascades once"*, which is the same insufficiency one level up.
+**Status:** OPEN -- **ready to fix.** Diagnosed, located, and measured. Deliberately not
+fixed in #427, which was scoped to the View column/formula *binding*; this is a distinct
+single-pass bug that predates it and is unchanged by it.
+
+**The defect.** `_strip_view_formulas` removes formulas whose `expr` references a removed
+**column**, in one pass. It does not then remove formulas whose `expr` references a removed
+**formula**. ThoughtSpot Views chain formulas freely, so the result is a surviving formula
+holding a dangling `[formula_*]` reference -- which `tml_lint.py`'s **I13** gate exists
+precisely to catch: *"a bracket id reference matching no `formulas[].id` is parsed as search
+tokens, so the formula fails to import (error_code 14516, live-verified 2026-07-30)"*.
+
+**Live measurement** (read-only, zero writes -- the 42-View census corpus, replaying a
+removal for every column each formula references):
+
+```
+48 transitive dangling cases across 6+ real Views, e.g.
+  '2. muze of fis rank...' : remove 'Response Code' -> formula_rank-new still references [formula_count]
+  'Growth View'            : remove 'sales'         -> formula_前年比区分 still references [formula_growth]
+  'Conditional Triggers2'  : remove 'sales(today)'  -> formula_SalesException still references [formula_Delta]
+  'Partner Analysis'       : remove 'date'          -> formula_New labels still references [formula_Moving Sum last 4 quarters]
+```
+
+Worked example -- `2. muze of fis rank...`, removing `Response Code`:
+`formula_count`, `formula_rank` and `formula_GA-Rank` all reference
+`[FIS_Rank Model_1::Response Code]` and are correctly removed; `formula_rank-new`
+references `[formula_count]`, is NOT removed, and now dangles.
+
+**The fix.** Iterate to a fixed point: after removing a formula, re-scan for formulas whose
+`expr` references any removed formula's **id** (`[formula_X]`) or **name**, and remove those
+too, repeating until the set stops growing (bounded by the formula count, so no cycle risk
+beyond a visited set). Then re-run the existing `view_columns[]` + `search_query` cleanup
+over the full closure -- #427 already routes both through the removed-formula set, so they
+come along for free once the set is complete.
+
+**Also fix the same shape on the Model path** if the "cascades once" comment there is
+likewise a chain-depth assumption rather than a proven bound.
+
+**Two further items folded in from the BL-191 fix round** (both in this closure-rebuilding
+code, so they are cheapest to fix here):
+
+1. **A self-named decorated formula column is under-removed.** BL-191's decoration gate only
+   strips decoration when `name != search_output_column`, which is what stops an authored
+   `Total sales` being read as a decorated `sales`. It costs one real corpus case: `Sales with
+   MONTH 2` has a column whose `name` and `search_output_column` are BOTH `Month(YearMonth)`,
+   surfacing formula `YearMonth`, so removing `年月日` drops the formula and keeps its column
+   — one dangling reference, which fails loudly at import (I13 / 14516). Recover it by having
+   the formula-surfacing path unwrap decoration on its own terms, where the candidate set is
+   formula NAMES rather than arbitrary columns and the collision risk is far narrower.
+2. **A formula and a physical column sharing a display name are indistinguishable.** A
+   `view_columns[]` entry carries no `formula_id`, so removing a formula would take a
+   same-labelled physical entry with it. Not reachable from a well-formed View (ThoughtSpot
+   does not permit two output columns with the same label) and not separable without a field
+   the document lacks — but it should be stated wherever this closure is rebuilt.
+
+**Testing.** A three-deep chain fixture (`A` on a column, `B` on `[formula_A]`, `C` on
+`[formula_B]`) asserting all three go, plus their `view_columns[]` entries and
+`search_query` tokens; a cycle fixture to prove termination; and a negative case where an
+unrelated formula survives. The corpus sweep in #427's report is the regression oracle --
+re-run it and assert 0.
+
+**Target:** next `tools/ts-cli/` dependency-engine change; pairs naturally with BL-197.
+Needs a version bump in both `__init__.py` and `pyproject.toml`.
