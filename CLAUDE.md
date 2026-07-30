@@ -80,6 +80,34 @@ These branches are pushed to remote for backup but never merged to main until ve
 
 **Session-start protocol:** see `.claude/rules/branching.md` — check your branch before making any edits.
 
+## Resolving conflicts in `docs/backlog.md` and `CHANGELOG.md`
+
+Both files are append-only lists with one fixed insertion point, so concurrent
+branches conflict there routinely. The resolutions are NOT symmetric:
+
+- **`CHANGELOG.md` — accept both.** Two entries under the same date heading are
+  independent additions. Order newest-version-first, matching the file.
+- **`docs/backlog.md` — never accept both.** Both branches will have claimed the
+  same number (this has happened twice: BL-150, BL-171), and `BL-NNN` is cited
+  ~1,000 times across ~230 files, so a duplicate silently changes what those
+  citations mean. **Citation count decides, not arrival order:** check which id
+  is already cited elsewhere in the repo — that one keeps the number, renumber
+  the other. If neither is cited yet, or both are cited equally, keep main's
+  side and renumber the incoming item (the practical default). (Rule 2 only
+  scans `agents/`, `tools/` and `.github/` for dangling citations — not `docs/`
+  — so a renumber still needs a manual look at specs and audit reports.)
+
+After resolving, run `python3 tools/validate/check_backlog_integrity.py --root .`
+It catches a duplicated id, a citation left dangling by a renumber, and a stray
+conflict marker.
+
+**What it does not catch.** Git can auto-merge a line from one item's section into
+its neighbour's, above the conflict region, so it never appears in the conflict at
+all. In PR #356 a stale `**Target:**` line attached to the wrong backlog item this
+way. After a naive accept-both each duplicate section carries exactly one Target
+line, so no count-based rule fires. Read the whole of both adjacent sections, not
+just the marked region.
+
 ## Auth and secrets
 
 Credentials are never stored in files, env files, or git. Pattern used throughout:
