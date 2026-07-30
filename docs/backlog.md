@@ -5640,7 +5640,96 @@ BL-182 for Snowflake).
 `tools/ts-cli/ts_cli/sv_parse.py` (`:470-492`), `tools/ts-cli/ts_cli/sv_build_model.py` (`:96`),
 `tools/ts-cli/tests/test_sv_translate.py` (`:352-361` -- **asserts the defect**),
 `agents/shared/worked-examples/snowflake/ts-from-snowflake-identifier-resolution.md`.
-**Status:** OPEN -- **ready to fix**, with a mandatory three-part scope (below).
+**Status:** RESOLVED 2026-07-30 (ts-cli v0.126.0, from-snowflake-sv SKILL.md v1.19.4 --
+`fix(ts-cli): BL-178 -- restore from-snowflake-sv formula reference integrity (3 defects + lint gate)`).
+All three defects fixed, the poisoned test corrected, and the worked example re-verified live.
+
+**How each defect was fixed:**
+
+| Defect | Fix |
+|---|---|
+| 1 -- inverted resolution order | `make_resolver` now takes step 1 first: a fact/metric that is a **passthrough** of a physical column (`expr is None`) resolves to `[TABLE::col]`, which is what `build-model` emits for it. This is the defect that fired on TPC-DS -- every fact there is a passthrough -- and all 5 of 5 metrics now resolve to real column references. |
+| 2 -- minted id != emitted ref | `display_title` moved to `sv_translate` and is **re-exported** by `sv_build_model`, so there is exactly ONE naming path; the resolver emits `[{construct_formula_id(c)}]`, which is by construction the id the builder mints. Metric-on-metric additionally gained the documented step-3 `group_*` double aggregation (grouping on the parent-side PK of the connecting relationship), which is what the worked example records and what the resolver never implemented. |
+| 3 -- `alias_name` from the expression | `_resolve_rhs_alias` keeps the RHS-derived `(alias_table, alias_name)` **only** for a bare `alias.NAME` right-hand side; anything computed keeps the DECLARED left-hand-side name, so `fact_idx`/`metric_idx` are keyed on the name references actually use. This also removes the metric self-reference and makes the resolver's default alias for bare identifiers the table the construct is declared on. |
+
+**Live re-verification (se-thoughtspot, 2026-07-30, `--policy VALIDATE_ONLY`, nothing
+persisted -- 0 objects named `Company Workforce%` before and after):**
+
+- Pre-fix TML: `status_code: ERROR`, `error_code 14516`, *"Formula addition failed. Formula:
+  Avg Tenure, Error: Search did not find "formula_tenure_months )" in your data or
+  metadata."* — **this settles the question the review left open: a dangling reference is a
+  HARD IMPORT FAILURE, not a silently-broken measure.**
+- Post-fix TML: `status_code: OK`.
+
+**Defect 3 was worse than the fidelity review recorded, and the record should say so.** The
+review called it latent outside computed facts. On the worked example it ALSO made two
+constructs collide on one index key: `AVG_TENURE` was indexed under `employees.tenure_months`
+(colliding with the fact of that name) and `AVG_HEADCOUNT_PER_COMPANY` under
+`employees.headcount`, where it **overwrote `HEADCOUNT`'s own entry** — so
+`employees.headcount` resolved to the *wrong metric*. It never surfaced because defect 2 broke
+the reference regardless. The "latent" characterisation was true of TPC-DS, not of the general
+case.
+
+**A fourth defect of the same family was found in PR #424's review and fixed on the same
+branch (F1).** Keying the indexes on the declared name is necessary but not sufficient: a
+*renamed passthrough* (`STORE_SALES.revenue as store_sales.ss_ext_sales_price`) has a declared
+name AND a physical column, and indexing it under only one of them leaves the other unreachable.
+Referenced by its declared name it missed both indexes, fell through to step 1's
+assumed-physical branch, and emitted `column_id: STORE_SALES::revenue` — a column that does not
+exist, and one **I13 cannot catch** because it is a `TABLE::col` reference, not a `[formula_*]`
+one. Each construct is now indexed under both names, declared name winning on collision. Where
+the two readings can disagree (a renamed passthrough whose declared name may also be a real
+column — undecidable without a column inventory the translator never receives) the reference
+resolves to the semantic view's construct and carries a ⚑ annotation, rather than silently
+aggregating a different column.
+
+**A FIFTH defect of the same family, found in the re-review (N1) and fixed on the same
+branch.** Indexing facts and metrics under their declared names was still not enough:
+`_index_constructs` did not cover `dimensions()` at all, so a **renamed dimension** referenced
+by its declared name fell through to assumed-physical exactly as the renamed passthrough did.
+`DM_CATEGORY.CATEGORY as dm_category.CATEGORY_NAME` referenced as
+`PARTITION BY dm_category.category` emitted `group_sum ( … , [DM_CATEGORY::category] )` where
+the real column is `CATEGORY_NAME` — **a second worked-example regression**
+(`ts-from-snowflake-dunder.md:207` documents the correct form), undetected for the same reason
+the first was. Dimensions are now resolved through the same index with a three-way split
+matching `_translate_dimension`'s own: passthrough → the aliased column, bare-column rename
+(`CASE_ID as ID`) → the column the *expression* names, computed → the minted formula id. That
+last case was also wrong before: a computed dimension referenced by name emitted
+`[TABLE::name]` for a construct that is a formula. Emitted output now matches the dunder
+worked example character for character.
+
+**The "why did nothing catch it" half is now its own entry — BL-195.** `ts snowflake
+build-model` runs `lint_tml` (single-document) and never `lint_cross_references`, so a wrong
+`TABLE::col` is invisible to it; and `lint_cross_references` does not walk `formulas[].expr`
+at all, so it would not have caught this one even if it had been wired in. I13 closed the
+dangling-*formula* half of this class on 2026-07-30; BL-195 closes the dangling-*column* half.
+
+**Two smaller correctness items from the same review:** every double aggregation now carries the
+🔄 review marker the rules file has always mandated (it was specified and never emitted), and a
+degenerate grouping — the inner metric aggregating the very column the relationship implies as
+the grouping key, i.e. `group_count([X],[X])` = one row per group — is skipped and flagged
+instead of emitted. A passthrough *metric* (`expr is None`) also no longer crashes
+`translate-formulas` with a raw `AttributeError`; it is a skip with a reason.
+
+**Discovered, not fixed:** same-table metric-on-metric has no resolvable reference at all — see
+**BL-194**. It now fails loudly at `build-model` via I13 rather than emitting a broken Model,
+which is the right direction but not a conversion.
+
+**Validator promotion shipped with the fix:** `ts tml lint` invariant **I13** (and the
+`formulas[].expr` half of `tools/validate/check_tml.py`) now reject a `[formula_*]`
+reference matching no declared id. I13 fires with exactly 4 findings on the pre-fix worked
+example and is clean on the post-fix one. See BL-183 (partially resolved -- its second
+check, CA-JSON table references in `lint-ddl`, is untouched).
+
+**Divergences from the 2026-06-13 baseline that are NOT this regression** (recorded in the
+worked example's re-verification section, per BL-184's caveat): 6 of 18 display names +
+their formula ids (first-synonym promotion, coverage row 14, landed 2026-06-15 -- BL-179);
+`Total Salary` staying a `column_id` entry so the formula count is 8 not 9
+(duplicate-`column_id` promotion keeps the FIRST occupant, ts-cli v0.92.0); and
+`Tenure Months` typed ATTRIBUTE (BL-181). All three are current documented behaviour acting
+on a stale document.
+
+**Original filing follows.**
 
 **The symptom.** Converting a Semantic View whose metrics aggregate a declared fact -- the normal
 shape, and the shape upstream's own converter always emits -- produces a Model TML in which
@@ -5975,7 +6064,25 @@ prefers for BL-178 (F9) and BL-182 item 2 (F20).
 `tools/ts-cli/ts_cli/sv_lint_ddl.py` (`ts snowflake lint-ddl`),
 `agents/shared/schemas/ts-model-conversion-invariants.md` (a new invariant row),
 `docs/quality-gates.md`.
-**Status:** OPEN -- **the preferred exit** for BL-178's class per `.claude/rules/repo-audit.md`.
+**Status:** PARTIALLY RESOLVED 2026-07-30 -- **check 1 shipped** with BL-178's fix
+(ts-cli v0.126.0). **Check 2 (CA-JSON table references in `ts snowflake lint-ddl`) is still
+OPEN** and remains this entry's remaining scope.
+
+Check 1 as shipped: `tml_lint._check_dangling_formula_refs` resolves every `[formula_*]`
+token in each `formulas[].expr` and every `columns[].formula_id` against the document's
+declared id set, naming the referring formula/column in the finding. Registered as invariant
+**I13** in `ts-model-conversion-invariants.md` (with the live failure mode -- `error_code
+14516`, verified on se-thoughtspot 2026-07-30) and documented in `tools/ts-cli/README.md`.
+The `formulas[].expr` half was added to `tools/validate/check_tml.py` in the same pass, since
+that validator already checked the `columns[].formula_id` half and passing the expr half was
+the other reason "every gate reported clean".
+
+Approach step 1 (a positive case, so the check cannot be satisfied by rejecting everything)
+and step 4 (run over existing worked-example TMLs first) were both done: 16 model documents
+across `agents/shared/worked-examples/` and the repo's `*.model.tml` files were scanned and
+**0** produce an I13 finding, so the check was enabled as an error with no triage backlog.
+`docs/quality-gates.md` needed no regeneration -- I13 is a new invariant inside an existing
+gate, not a new gate.
 
 **Why this is validator-shaped and not a backlog fix.** BL-178 is one bug; *dangling
 cross-references in emitted TML* is a recurring class. The check is purely structural over a
@@ -6565,6 +6672,158 @@ someone regenerates, so they may lag reality in between. The rendered document n
 points readers at `git log -1 -- tools/validate/<validator>.py` for an authoritative answer. Dropping
 the column entirely was the alternative; it was not taken because the audit's angle-7 checklist uses
 the column as a starting point, and a labelled snapshot is more useful than nothing.
+
+---
+
+## BL-195 -- `build-model` cannot see a wrong `TABLE::col`: it runs single-doc lint only, never the cross-reference check `Tier 2`
+
+**Filed:** 2026-07-30.
+**Source:** PR #424 re-review (N1). The renamed-dimension bug N1 found was fixed on that
+branch; **this entry is the "why did no gate see it" half**, which generalises well beyond
+that one bug.
+**Affects:** `tools/ts-cli/ts_cli/commands/snowflake.py:509` (`build-model`'s lint call),
+`tools/ts-cli/ts_cli/tml_lint.py` (`lint_cross_references`),
+`tools/ts-cli/ts_cli/sv_introspect.py` (`build_tables_spec` -- already holds the column sets),
+`agents/cli/ts-convert-from-snowflake-sv/SKILL.md` (Step 10-FILE / Step 11).
+**Status:** OPEN -- **ready to fix**; the inputs already exist, they are simply not wired.
+
+**The gap.** `ts snowflake build-model` calls `lint_tml(model_doc)` and nothing else. That is
+the SINGLE-DOCUMENT invariant set (I1/I2/I4/I5/I8/I12/I13 + guid) -- every rule it can check
+is answerable from the model document alone. `lint_cross_references(model_tml, tables)` is the
+check that resolves each `column_id: TABLE::COL` and each `[TABLE::COL]` inside a join `on:`
+against the columns a table actually provides, and **`build-model` never calls it.** Only
+`ts tml lint --dir` and `ts tableau build-model` do.
+
+The consequence is a whole class of defect that build-model reports clean:
+
+| Emitted | Reality | Caught by |
+|---|---|---|
+| `[formula_X]` matching no declared id | dangling formula ref | **I13** (shipped, BL-183) |
+| `column_id: TABLE::COL` where COL does not exist on TABLE | dangling column ref | **nothing, on this path** |
+
+Both fail at import with the same shape of error. Only one has a gate.
+
+**Concrete repro (the bug N1 found, now fixed -- but the blindness is not).** From
+`agents/shared/worked-examples/snowflake/ts-from-snowflake-dunder.md:45,68-70`:
+
+```sql
+dimensions ( DM_CATEGORY.CATEGORY as dm_category.CATEGORY_NAME ... )
+metrics ( DM_ORDER_DETAIL.CATEGORY_QUANTITY
+            as SUM(dm_order_detail.QUANTITY) OVER (PARTITION BY dm_category.category) )
+```
+
+emitted `group_sum ( [DM_ORDER_DETAIL::QUANTITY] , [DM_CATEGORY::category] )` -- the real
+column is `CATEGORY_NAME` -- and `lint_tml` returned `[]`. The worked example documents the
+correct form at `:207`, so this was a *second* worked-example regression, undetected for the
+same reason the first was: no gate looked.
+
+**Why this is cheap.** `build-model` already receives `--tables` (the alias->table map) and
+the from-Snowflake flow already builds a full column inventory in Step 6B via
+`ts snowflake introspect` (`sv_introspect.build_tables_spec` returns each table's columns from
+`INFORMATION_SCHEMA`). The column sets `lint_cross_references` wants therefore exist upstream;
+they are just not threaded into `build-model`. Two candidate wirings:
+
+1. **Preferred** -- accept an optional `--tables-spec` (the Step 6B introspect output) and,
+   when present, run `lint_cross_references` alongside `lint_tml`. Absent, behave exactly as
+   today, so the file-only path with no warehouse access is unaffected.
+2. Extend the `--tables` map to carry an optional `columns: [...]` per table and use it when
+   populated.
+
+**Scope note -- this is not only a `[TABLE::COL]` problem.** `lint_cross_references` today
+inspects `column_id` and join `on:` clauses and explicitly **does not** inspect
+`formulas[].expr` (its docstring says so). A formula expression's `[TABLE::COL]` references
+are therefore unchecked even by the cross-reference linter -- and the dunder repro above is
+exactly that case, a `group_sum` inside a `formulas[].expr`. So this entry needs BOTH:
+(a) wire the check into `build-model`, and (b) extend it to walk `formulas[].expr` bracket
+references that contain `::`. Without (b), wiring (a) would not have caught the repro.
+
+**Approach:**
+
+1. Extend `lint_cross_references` to resolve `TABLE::COL` references inside `formulas[].expr`
+   (reuse `_check_table_col_ref`, which already exists and is shared by the `column_id` and
+   join checks). Unit-test with a resolving reference as well as a dangling one.
+2. Thread a column inventory into `ts snowflake build-model` (option 1 above) and run the
+   check when it is available; print findings the same way `lint_findings` are printed and
+   exit 1 on them.
+3. Do the same for `ts databricks build-model`, which has the identical single-doc-only call.
+4. Run over the repo's worked examples before enabling as an error -- the dunder example is
+   now correct, but the other examples have never been checked this way, so expect findings
+   and triage rather than weaken.
+5. Update the from-Snowflake SKILL.md to pass the Step 6B introspect output through.
+
+**Target:** next from-Snowflake wave, with or after BL-194. This is the two-bucket rule's
+preferred exit for the class: I13 closed the dangling-formula half on 2026-07-30, and this
+closes the dangling-column half.
+
+---
+
+## BL-194 -- Same-table metric-on-metric has no resolvable reference, so a common ratio shape hard-fails `Tier 2`
+
+**Filed:** 2026-07-30.
+**Source:** PR #424 review (F2) -- found while fixing BL-178, by asking what the
+metric-on-metric fallback actually resolves to rather than only testing the cross-table path
+the worked example exercises.
+**Affects:** `tools/ts-cli/ts_cli/sv_translate.py` (`make_resolver` step 3,
+`_resolve_double_aggregation`), `agents/shared/mappings/ts-snowflake/ts-from-snowflake-rules.md`
+(Identifier Resolution step 3), `agents/cli/ts-convert-from-snowflake-sv/references/coverage-matrix.md`
+row 27.
+**Status:** OPEN. Documented as a limitation in the rules file and coverage row 27 by PR #424 --
+the behaviour is honest and loud, not silent, but the shape is common enough to deserve a fix.
+
+**The shape.** A metric that references another metric **on the same table**:
+
+```sql
+metrics (
+    ORDERS.total_rev   as SUM(AMOUNT),
+    ORDERS.order_count as COUNT(ID),
+    ORDERS.aov         as orders.total_rev / orders.order_count
+)
+```
+
+**What happens.** Step 3's double aggregation needs a relationship between the inner metric's
+table and the referencing metric's table, to get a grouping key from the parent side. Same
+table means no relationship, so there is no grouping key and the resolver falls back to the
+inner metric's `[formula_<id>]`. That reference resolves **only if the inner metric became a
+`formulas[]` entry** -- and a simple aggregate (`SUM(col)`, `COUNT(col)`) becomes a
+`columns[]` entry with an `aggregation:` instead, which has no formula id. So the reference
+dangles, `ts tml lint` I13 fires, and `ts snowflake build-model` **exits 1**.
+
+Reproduced on the shape above: `formula_Avg Order Value = [formula_Total Rev] / [formula_Order
+Count]`, both referents emitted as `columns[]` entries.
+
+**This is the honest outcome, and it is why it is Tier 2 rather than Tier 1.** Before BL-178
+the same input produced a Model that imported broken with every gate green; now it fails at
+build time with a named finding. A user is blocked rather than misled, which is the right
+direction -- but blocked is not converted.
+
+**Approach -- inline the inner aggregation.** The translator already holds everything needed:
+the inner metric's parsed `expr` and a resolver for its table. Where the inner metric is a
+simple aggregate on a physical column, substitute its **translated aggregation** rather than a
+reference to it:
+
+```
+orders.total_rev / orders.order_count
+  -> sum ( [ORDERS::AMOUNT] ) / count ( [ORDERS::ID] )
+```
+
+This is the same "inline rather than reference" resolution the Databricks direction already
+uses for cross-measure references (`mv_translate.py`, cross-measure inlining via dependency
+DAG), so the pattern is established in the repo rather than novel. Notes:
+
+1. Scope it to the **same-table, no-grouping-key** case. Cross-table references must keep
+   their `group_*` double aggregation -- inlining there would silently drop the grouping and
+   change the numbers, which is the failure mode BL-178 was about.
+2. Reuse the cycle guard already threaded through `make_resolver` (`_resolving`); inlining
+   deepens the same recursion.
+3. Where the inner metric is NOT a simple aggregate, inlining its whole translated expression
+   is still correct but can duplicate large expressions -- measure the emitted size before
+   deciding whether to inline or to keep failing loudly for that sub-case.
+4. Add the shape to `test_sv_formula_ref_contract.py` (the ratio DDL above is ready to lift
+   from this entry) and remove the limitation paragraph from the rules file and coverage row 27
+   in the same PR.
+
+**Target:** next from-Snowflake wave. Cheap, well-bounded, and it converts an input that
+currently cannot be converted at all.
 
 ---
 

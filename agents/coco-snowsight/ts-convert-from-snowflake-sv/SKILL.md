@@ -4,7 +4,7 @@ description: Convert a Snowflake Semantic View into a ThoughtSpot Model by readi
 ---
 
 # Snowflake Semantic View → ThoughtSpot Model
-<!-- synced-from: agents/cli/ts-convert-from-snowflake-sv/SKILL.md @ v1.9.0 on 2026-06-13 (checked 2026-07-28: CLI advanced to v1.19.1 via a BL-128 context-cost extraction only — references/ split, no logic change — so this bump does not add to the tracked SYNC-DEBT gap; real content sync remains at v1.9.0, see agents/SYNC-DEBT.md) -->
+<!-- synced-from: agents/cli/ts-convert-from-snowflake-sv/SKILL.md @ v1.9.0 on 2026-06-13 (checked 2026-07-30: CLI is now v1.19.4. The v1.19.1 bump was a BL-128 context-cost extraction only — references/ split, no logic change — but v1.19.2/v1.19.3/v1.19.4 ARE logic and mapping divergences: v1.19.2 corrected six string functions + the `in { }` delimiter (BL-170), v1.19.3 corrected eleven coverage-matrix rows from the TPC-DS fidelity review, and v1.19.4 fixed BL-178's identifier-resolution defects. Their shared references (ts-from-snowflake-rules.md, ts-snowflake-formula-translation.md) reach CoCo via stage-sync, and this mirror's own v1.6.0 carries the one piece CoCo must enforce by hand — the I13 pre-import checklist row — but the CLI's resolver behaviour has no CoCo equivalent to sync. Real content sync remains at v1.9.0; see agents/SYNC-DEBT.md) -->
 
 Converts a Snowflake Semantic View into a ThoughtSpot Model. Reads the semantic
 view DDL via `GET_DDL`, maps tables, relationships, dimensions, and metrics to
@@ -777,6 +777,14 @@ and note the correction in the output.
 | 9 | `column_type` under `properties:` | Every column and formula entry has `properties: column_type:` — not bare `column_type:` | Nest under `properties:` |
 | 10 | Every formula has a `columns[]` entry | Every `id` in `formulas[]` has a corresponding `formula_id:` in `columns[]` | Add the missing `columns[]` entry |
 | 11 | `last_value` formula YAML encoding | Any `formulas[]` entry whose `expr` contains `{ [col] }` (curly braces) must use a `>-` block scalar for `expr:` — inline string assignment will cause a YAML parse error | Change `expr: "last_value(...)"` → `expr: >-\n  last_value(...)` |
+| 12 | **Every `[formula_*]` reference resolves (I13)** | Collect every `formula_*` token inside brackets in each `formulas[].expr`, plus every `columns[].formula_id`. Each MUST match a declared `formulas[].id` **exactly** (case included) | The reference is almost always the SQL identifier where the id is the display name — e.g. `average ( [formula_tenure_months] )` against `id: formula_Tenure Months`. Rewrite the reference to the declared `id`. A metric that aggregates a **passthrough** fact (right-hand side is a bare physical column) must reference `[TABLE::col]` instead — that fact is a `columns[]` entry, not a formula |
+
+**Why row 12 matters here in particular.** On the CLI this invariant is enforced
+mechanically — `ts snowflake build-model` runs `ts tml lint` (I13) and exits 1. CoCo has no
+`ts` CLI, so **this checklist IS the gate**: an unresolvable bracket reference is parsed by
+ThoughtSpot as search tokens and the import fails with `error_code 14516`,
+*Search did not find "formula_X"* (live-verified 2026-07-30). It reached production on the CLI
+side for five weeks because nothing checked it (BL-178/BL-183) — do not skip the row.
 
 **Spotter enablement (ask before showing the review summary):**
 
@@ -1105,6 +1113,7 @@ After completing one conversion, offer to convert additional views.
 
 | Version | Date | Summary |
 |---|---|---|
+| 1.6.0 | 2026-07-30 | **Pre-import checklist row 12 — every `[formula_*]` reference must match a declared `formulas[].id` (invariant I13).** CoCo cannot run `ts tml lint`, so this checklist is its only gate for the class of defect that shipped on the CLI side for five weeks: a metric-on-fact reference minted from the SQL identifier while the formula id is minted from the display name, which ThoughtSpot parses as search tokens and rejects with `error_code 14516` (live-verified on se-thoughtspot 2026-07-30 — BL-178/BL-183). The row also covers the passthrough case: a metric aggregating a fact whose right-hand side is a bare physical column must reference `[TABLE::col]`, because that fact is emitted as a `columns[]` entry and no formula exists to point at. |
 | 1.5.0 | 2026-06-13 | Identifier resolution engine: facts parsing (BL-003b), metric→fact resolution (BL-003c), double aggregation via group_aggregate (BL-003), window metrics referencing metrics (GAP-13), joinless SV handling (GAP-03/BL-004). Mirrors CLI v1.9.0. |
 | 1.4.0 | 2026-06-13 | Add PT1 pass-through policy; fix `count_distinct` example → `unique count` (I5); sync to CLI v1.7.0. |
 | 1.3.1 | 2026-06-11 | Drop `TEST_SV_` model-name prefix (N1) and add the mandatory formula-reference gate (I7), citing `ts-model-conversion-invariants.md` — mirrors the CLI skill v1.5.0. |
