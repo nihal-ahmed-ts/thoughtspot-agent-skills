@@ -22,7 +22,7 @@ Constructs. Source of truth for the formula rows is
 | Card `bar` | Answer (BAR) | Migrated | from `chartBody` |
 | Card `table` | Answer (TABLE) | Migrated | from `chartBody` |
 | Page | Liveboard | Migrated | one Liveboard per page |
-| Page `collectionIds` / `children` | Liveboard tabs | Approximated | tab grouping approximated; not exercised against a populated `collectionIds` payload |
+| Page `collectionIds` / `children` | Liveboard tabs | Approximated | single-tab path only; never exercised against a populated `collectionIds` payload |
 | Card layout (`preferredFullWidth`/`preferredFullHeight`) | Liveboard tile size | Approximated | grid approximation |
 
 ### Card query constructs
@@ -31,22 +31,16 @@ Constructs. Source of truth for the formula rows is
 |---|---|---|---|
 | `groupBy[]` | attribute columns (rows / x-axis) | Migrated | |
 | `columns[].aggregation` | measure aggregation | Migrated | see `AGG_MAP` |
-| `orderBy[]` (`ASCENDING`/`DESCENDING`) | column sort | Migrated | |
-| `limit` | Answer row limit / top-N | Migrated | |
-| `columns[].format` (CURRENCY / NUMBER / percent / precision) | number format | Approximated | format-string fidelity pass outstanding |
-| `conditionalFormats[]` | conditional formatting rule | Approximated | threshold rules only |
-| `quickFilters[]` | Liveboard filter chip | Approximated | promoted to a cross-viz Liveboard filter |
+| `limit` | Answer row limit (`top N`) | Migrated | not applied to KPI cards |
+| `chartType` `kpi` / `bar` / `table` | Answer `display_mode` + `chart.type` | Migrated | |
 
-### Filter operands (`filters[].operand`)
+Everything else a card carries — sort, filters, quick filters, number formats,
+conditional formatting — is **not** emitted. See Unmapped Constructs.
 
-| Construct | ThoughtSpot target | Status | Notes |
-|---|---|---|---|
-| `IN` | IN | Migrated | |
-| `NOT_IN` | NOT_IN | Migrated | |
-| `GREATER_THAN` / `LESS_THAN` | GT / LT | Migrated | |
-| `BETWEEN` | BW_INC | Approximated | inclusive bounds assumed |
-| `LAST_90_DAYS` / `LAST_N_DAYS` | relative last-N-days preset | Approximated | operand→preset table is best-effort |
-| `THIS_MONTH` / `THIS_QUARTER` / `YTD` | matching relative-date preset | Approximated | fiscal (`chartBody.fiscal`) semantics not verified |
+### Filter operands
+
+None. Card `filters[].operand` values are parsed into the IR but no filter is emitted
+onto the Answer or Liveboard — see Unmapped Constructs.
 
 ### Beast Mode formulas
 
@@ -57,9 +51,8 @@ for the full function/aggregation table.
 |---|---|---|---|
 | Arithmetic, comparison, logical operators | same operators | Migrated | |
 | `SUM` / `AVG` / `MIN` / `MAX` / `COUNT` / `COUNT DISTINCT` | `sum` / `average` / `min` / `max` / `count` / `unique count` | Migrated | |
-| Single-branch `CASE WHEN … THEN … ELSE … END` | `if (…) then … else …` | Migrated | |
-| Multi-branch `CASE` | nested `if/else` | Approximated | branch order preserved; verify fall-through |
-| `DATEDIFF` | `diff_days` | Approximated | Domo grain argument dropped — day grain assumed |
+| `DATEDIFF` | `diff_days` | Approximated | Domo grain argument dropped — day grain assumed; verify arg order (Domo may return b−a) |
+| `STDDEV` / `VARIANCE` | `stddev` / `variance` | Approximated | verify sample vs population |
 | String functions (`CONCAT`, `UPPER`, `LOWER`, `SUBSTRING`, …) | same-named TS functions | Migrated | |
 
 ## Unmapped Constructs
@@ -74,8 +67,14 @@ migration report.
 | Live (`domo-cloud`) fetch | Not wired into `parse_app` — `ts_cli/domo/client.py` is a probed foundation only (datasets, pages, card metadata, Beast Modes) | Offline bundle is the only supported input today. Tracked in `open-items.md` |
 | Card `chartType` outside `kpi` / `bar` / `table` | Not in the chart-type map | Answer emitted with the closest type and flagged |
 | `chartVersion` other than `"2.0"` | Older versions nest the query differently | Only 2.0 is parsed |
-| Window / running-total / LOD Beast Modes | No deterministic ThoughtSpot equivalent via string translation | Formula emitted verbatim and flagged for a human |
-| `dateRangeFilter` on a card | Relative-date range semantics unverified | Deferred |
+| Window / running-total / LOD Beast Modes (`OVER`, `PARTITION BY`, `RANK`, `LAG`/`LEAD`) | No deterministic ThoughtSpot equivalent via string translation | Formula emitted verbatim and flagged |
+| `CASE WHEN … END` — single- **and** multi-branch | The token translator cannot faithfully restructure control flow | Emitted verbatim and flagged. Recommended rewrite (`if (c) then x else y`) is in the Beast Mode mapping reference |
+| `IFNULL` / `COALESCE` / `NULLIF` / `CAST` | Need a structural rewrite, not a token swap | Emitted verbatim and flagged; recommended rewrites in the mapping reference |
+| `MEDIAN` / `PERCENTILE` | No clean ThoughtSpot TML keyword | Emitted verbatim and flagged |
+| Card `orderBy[]` (sort) | Not emitted onto the Answer | Parsed into the IR, then dropped — reported per card as `Approximated` with the sort spelled out |
+| Card `filters[]` — incl. `IN`, `NOT_IN`, `BETWEEN`, `LAST_N_DAYS`, `THIS_MONTH`, `YTD`, `dateRangeFilter` | No filter is emitted onto the Answer or Liveboard | Parsed into the IR, then dropped — reported per card. **The Answer will show unfiltered, all-time data** |
+| Card `quickFilters[]` | Not emitted as a Liveboard filter chip | Parsed into the IR, then dropped — reported per card |
+| Card `conditionalFormats[]` | Not emitted | Parsed into the IR, then dropped — reported per card |
+| Domo column `format` (CURRENCY / NUMBER / percent / precision) | No number format is emitted | Parsed into the IR, then dropped — reported per card |
 | Card drill paths and card-to-card links | No ThoughtSpot equivalent modelled yet | Deferred |
 | Multi-page Domo apps | One page → one Liveboard today | Deferred |
-| Domo column `format` → exact TS number-format string | Needs a fidelity pass against real formats | Approximated where possible (see above), flagged otherwise |

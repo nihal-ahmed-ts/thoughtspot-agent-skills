@@ -7,7 +7,7 @@
 ## Executive summary
 
 - **Migration complexity:** Low–Medium
-- **Automation %:** 89%  |  **Manual %:** 11%
+- **Automation %:** 56%  |  **Manual %:** 44%
 - **Estimated effort:** ~0.5–1 engineer-day
 - **Risk score:** Low–Medium — 1 item(s) flagged NEEDS REVIEW.
 
@@ -37,7 +37,7 @@
 | Datasets → Tables | 2 | 2 | 0 | 0 | 0 |
 | Joins | 1 | 0 | 0 | 1 | 0 |
 | Beast Modes → Formulas | 3 | 3 | 0 | 0 | 0 |
-| Cards → Answers | 3 | 3 | 0 | 0 | 0 |
+| Cards → Answers | 3 | 0 | 3 | 0 | 0 |
 | Pages → Liveboards | 1 | 1 | 0 | 0 | 0 |
 
 ## Data model
@@ -67,9 +67,9 @@
 
 | Card | ThoughtSpot chart | Status | Note |
 |---|---|---|---|
-| Net Revenue | KPI | Migrated |  |
-| Revenue by Region | BAR | Migrated |  |
-| Sales Rep Performance | TABLE | Migrated |  |
+| Net Revenue | KPI | Approximated | not carried onto the Answer — rebuild by hand: card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Region); conditional formatting (1 rule(s)) |
+| Revenue by Region | BAR | Approximated | not carried onto the Answer — rebuild by hand: sort (Total Revenue DESCENDING); card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Product Category) |
+| Sales Rep Performance | TABLE | Approximated | not carried onto the Answer — rebuild by hand: sort (Net Revenue DESCENDING); card filter(s) (Transaction Date LAST_90_DAYS); number format on Net Revenue, Avg Order Value, Discount Rate % |
 
 Assembled onto Liveboard **Sales Overview** (3 tiles).
 
@@ -80,6 +80,9 @@ Assembled onto Liveboard **Sales Overview** (3 tiles).
 ## Manual review (do these in ThoughtSpot)
 
 - **Join** Customer Master ↔ Sample Sales Transactions on `Customer ID` (NEEDS REVIEW) — inferred by shared column name. Confirm MANY_TO_ONE from the fact.
+- **Card** `Net Revenue` (kpi, Approximated) — not carried onto the Answer — rebuild by hand: card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Region); conditional formatting (1 rule(s))
+- **Card** `Revenue by Region` (bar, Approximated) — not carried onto the Answer — rebuild by hand: sort (Total Revenue DESCENDING); card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Product Category)
+- **Card** `Sales Rep Performance` (table, Approximated) — not carried onto the Answer — rebuild by hand: sort (Net Revenue DESCENDING); card filter(s) (Transaction Date LAST_90_DAYS); number format on Net Revenue, Avg Order Value, Discount Rate %
 
 ## Verification checklist
 

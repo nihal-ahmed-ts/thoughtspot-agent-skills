@@ -5,7 +5,7 @@ Re-run to refresh: `python3 tools/validate/generate_open_items_index.py`
 
 ## Summary
 
-**155 total items** across 19 skills — **69 open**, 71 verified, 15 deferred
+**156 total items** across 19 skills — **70 open**, 71 verified, 15 deferred
 
 | Skill | Total | Open | Verified | Deferred |
 |---|---|---|---|---|
@@ -18,9 +18,9 @@ Re-run to refresh: `python3 tools/validate/generate_open_items_index.py`
 | ts-convert-from-qlik | 6 | **5** | 0 | 1 |
 | ts-convert-from-snowflake-sv | 4 | **4** | 0 | 0 |
 | ts-object-answer-promote | 4 | **4** | 0 | 0 |
+| ts-convert-from-domo | 11 | **3** | 3 | 5 |
 | ts-load-source-data | 3 | **3** | 0 | 0 |
 | ts-publish-orgs | 8 | **3** | 4 | 1 |
-| ts-convert-from-domo | 10 | **2** | 3 | 5 |
 | ts-convert-from-sisense | 5 | **2** | 2 | 1 |
 | ts-convert-from-tableau | 17 | **2** | 12 | 3 |
 | ts-convert-from-powerbi | 5 | **1** | 3 | 1 |
@@ -28,7 +28,7 @@ Re-run to refresh: `python3 tools/validate/generate_open_items_index.py`
 | ts-convert-from-databricks-mv | 1 | **0** | 0 | 1 |
 | ts-convert-to-snowflake-sv | 0 | **0** | 0 | 0 |
 | ts-object-model-agentql-query | 6 | **0** | 6 | 0 |
-### Untagged (69 items)
+### Untagged (70 items)
 
 Items without a `[needs: ...]` tag. Consider adding one to enable batch triage.
 
@@ -41,6 +41,7 @@ Items without a `[needs: ...]` tag. Consider adding one to enable batch triage.
 | ts-audit | #13 | Liveboard viz fingerprinting | UNVERIFIED |
 | ts-convert-from-domo | #3 | A card's analyzer query is not reachable from any Domo API | OPEN |
 | ts-convert-from-domo | #6 | Join inference is a heuristic | OPEN |
+| ts-convert-from-domo | #11 | Card sort / filters / formats are parsed but not emitted | OPEN |
 | ts-convert-from-looker | #1 | `type: number` cross-measure SQL inlining edge cases | OPEN |
 | ts-convert-from-looker | #3 | Multiple explores that share views: one model or separate models | OPEN |
 | ts-convert-from-looker | #4 | `sql_always_where:` → ThoughtSpot RLS | OPEN |

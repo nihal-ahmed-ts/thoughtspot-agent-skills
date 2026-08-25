@@ -105,3 +105,25 @@ fidelity pass. Mapped as Approximated today.
 `collectionIds` is empty in the fixture, so `collectionIds` / `children` → Liveboard tab
 grouping is exercised only on the single-tab path. Multi-page Domo apps, and card drill
 paths / card-to-card links, are out of scope for this release (see the coverage matrix).
+
+## #11 — Card sort / filters / formats are parsed but not emitted — KNOWN
+
+`parsing.py` reads `orderBy`, `filters` (incl. relative-date operands), `quickFilters`,
+`conditionalFormats` and per-column `format` into the IR, but `answers.py` emits none of
+them. An Answer therefore lands **unsorted and unfiltered — showing all-time data** even
+when the source card was scoped to, say, `LAST_90_DAYS`.
+
+Found by auditing the emitted TML against the fixtures rather than trusting the coverage
+matrix: the fixture card `Revenue by Region` carries a `DESCENDING` sort, a `LAST_90_DAYS`
+filter and a `Product Category` quick filter, and the emitted Liveboard TML contained no
+sort, filter or format node at all.
+
+The dangerous part was not the gap but the **silence**: those cards were reported
+`Migrated` with an empty note, and the report claimed 89% automation. `_dropped_constructs`
+now detects each dropped construct per card, downgrades the card to `Approximated`, names
+the constructs in the note, and surfaces them in the report's Manual review section — the
+same fixture bundle now honestly reports 56% automation.
+
+Emitting them for real is deferred: card filters need an operand→ThoughtSpot-preset
+mapping that is still unverified (#8), and Liveboard filter chips need the `quickFilters`
+→ filter-chip binding designed. Tracked here rather than silently carried.

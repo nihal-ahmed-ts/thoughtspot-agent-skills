@@ -137,10 +137,16 @@ ts domo build-liveboard <bundle-dir> --model-name "<Model name>" --output-dir ou
 ```
 Resolve `page.cardIds` → cards → Answers, assembled onto one Liveboard in page order.
 `chartType` picks the viz (`kpi`→KPI, `bar`→BAR, `table`→TABLE); `groupBy`→attributes,
-aggregated `columns`→measures, `orderBy`→sort, column `format`→number format,
-`conditionalFormats`→conditional formatting, `quickFilters`→cross-viz Liveboard filter chips, and
-a `filters` operand like `LAST_90_DAYS` → the matching relative-date filter. `collectionIds` /
-page `children` become Liveboard tabs. Anything unmapped is flagged, never silently downgraded.
+aggregated `columns`→measures, `limit`→`top N`.
+
+⚠️ **What does NOT come across.** A card's **sort** (`orderBy`), **filters** (including relative
+dates like `LAST_90_DAYS`), **quick filters**, **conditional formatting** and **number formats**
+are parsed but **not emitted** — so each Answer lands unsorted and **unfiltered, showing all-time
+data**. Every affected card is reported `Approximated` in `liveboard_mapping.json` with the exact
+constructs named, and leads the migration report's Manual review section. Walk the user through
+that list and rebuild those by hand; do not present the Liveboard as a finished migration. See
+[references/coverage-matrix.md](references/coverage-matrix.md) → Unmapped Constructs.
+
 Then import:
 ```bash
 ts tml import --dir out/ --order tableau --policy ALL_OR_NONE --profile <name>

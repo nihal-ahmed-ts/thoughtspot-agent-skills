@@ -96,8 +96,53 @@ def _answer(card: Card, model_name: str, model_fqn: Optional[str]) -> tuple[dict
     return answer, review, reason
 
 
+def _dropped_constructs(card: Card) -> list[str]:
+    """Constructs present on the Domo card that the emitted Answer does NOT carry.
+
+    These are parsed into the IR but not translated (see references/open-items.md #11).
+    Reporting them per card is the point: without this, a card whose sort, date filter
+    and quick filters were all left behind still counted as fully "Migrated", which is
+    exactly the silent-downgrade this converter is supposed to refuse to do.
+    """
+    dropped: list[str] = []
+    q = card.query
+    if q.order_by:
+        dropped.append("sort (%s)" % ", ".join(
+            f"{o.column} {o.order}".strip() for o in q.order_by))
+    if q.filters:
+        dropped.append("card filter(s) (%s)" % ", ".join(
+            f"{f.column} {f.operand}".strip() for f in q.filters))
+    if card.quick_filters:
+        dropped.append("quick filter(s) (%s)" % ", ".join(
+            str(f.get("column") or f.get("name") or "?") for f in card.quick_filters))
+    if card.conditional_formats:
+        dropped.append(
+            f"conditional formatting ({len(card.conditional_formats)} rule(s))")
+    formatted = [c.column for c in q.columns if c.fmt]
+    if formatted:
+        dropped.append("number format on %s" % ", ".join(formatted))
+    return dropped
+
+
 def _viz_guid() -> str:
     return str(uuid.uuid4())
+
+
+def _card_mapping_row(card: Card, ans: dict, review: bool, reason: str,
+                      dropped: list[str]) -> dict:
+    """One card's row in the liveboard mapping — the report's source of truth."""
+    notes = [reason] if reason else []
+    if dropped:
+        notes.append("not carried onto the Answer — rebuild by hand: "
+                     + "; ".join(dropped))
+    return {
+        "urn": card.urn, "title": card.title, "chart_type": card.chart_type,
+        "ts_chart": ans.get("chart", {}).get("type", "TABLE"),
+        "status": ("NEEDS REVIEW" if review
+                   else "Approximated" if dropped else "Migrated"),
+        "note": " | ".join(notes),
+        "dropped_constructs": dropped,
+    }
 
 
 def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
@@ -121,6 +166,7 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
             continue
         idx += 1
         ans, review, reason = _answer(card, model_name, model_fqn)
+        dropped = _dropped_constructs(card)
         vid = f"Viz_{idx}"
         vizzes.append({"id": vid, "answer": ans, "viz_guid": _viz_guid()})
         w = max(card.pref_width or 6, 3)
@@ -130,11 +176,7 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
             y += h
         tiles.append({"visualization_id": vid, "x": x, "y": y, "width": w, "height": h})
         x += w
-        mapping_cards.append({
-            "urn": card.urn, "title": card.title, "chart_type": card.chart_type,
-            "ts_chart": ans.get("chart", {}).get("type", "TABLE"),
-            "status": "NEEDS REVIEW" if review else "Migrated", "note": reason,
-        })
+        mapping_cards.append(_card_mapping_row(card, ans, review, reason, dropped))
 
     lb_tml = {"liveboard": {
         "name": report_name,

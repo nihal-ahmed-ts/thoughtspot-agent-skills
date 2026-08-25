@@ -89,3 +89,66 @@ def test_build_liveboard_chart_types(tmp_path):
     assert "chart" not in vizzes["Sales Rep Performance"]
     # page card order preserved, all three resolved
     assert len(lb["visualizations"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Dropped-construct reporting (open-items #11)
+#
+# The converter does not emit card sort / filters / quick filters / conditional
+# formatting / number formats. That is a documented gap — but it must never be a
+# SILENT one, or the migration report tells the user a card migrated cleanly when
+# half its query was left behind.
+# ---------------------------------------------------------------------------
+
+def test_cards_with_dropped_constructs_are_not_reported_migrated(tmp_path):
+    """A fixture card carries a sort, a LAST_90_DAYS filter and a quick filter."""
+    from ts_cli.domo.answers import build_liveboard_artifacts
+    from ts_cli.domo.parsing import parse_app
+
+    arts = build_liveboard_artifacts(parse_app(FIXTURES), model_name="M")
+    cards = {c["title"]: c for c in arts["mapping"]["cards"]}
+
+    bar = cards["Revenue by Region"]
+    assert bar["status"] == "Approximated", "dropped constructs must downgrade the card"
+    assert "Total Revenue DESCENDING" in bar["note"]
+    assert "LAST_90_DAYS" in bar["note"]
+    assert "Product Category" in bar["note"]
+    assert set(bar["dropped_constructs"]) and all(
+        isinstance(d, str) for d in bar["dropped_constructs"])
+
+    # No card in this bundle should claim a clean migration.
+    assert not [c for c in arts["mapping"]["cards"] if c["status"] == "Migrated"]
+
+
+def test_dropped_constructs_reach_the_migration_report():
+    from ts_cli.domo.answers import build_liveboard_artifacts
+    from ts_cli.domo.build_model import build_model_artifacts
+    from ts_cli.domo.parsing import parse_app
+    from ts_cli.domo.report import render_report
+
+    app = parse_app(FIXTURES)
+    model = build_model_artifacts(app, connection_name="C", db="D", schema="S")
+    lb = build_liveboard_artifacts(app, model_name="M")
+    md = render_report(model["mapping"], lb["mapping"])
+
+    review = md.split("## Manual review")[1].split("## Verification")[0]
+    assert "Revenue by Region" in review
+    assert "LAST_90_DAYS" in review
+    # Automation % must not claim the cards came across cleanly.
+    assert "**Automation %:** 89%" not in md
+
+
+def test_card_with_no_extra_constructs_stays_migrated():
+    """Guard the other direction — the downgrade must be construct-driven, not blanket."""
+    from ts_cli.domo.answers import build_liveboard_artifacts
+    from ts_cli.domo.ir import Card, CardQuery, DomoApp, Page, QueryColumn
+
+    app = DomoApp(app_name="Clean", source="-", extraction_mode="offline")
+    app.cards = [Card(urn="1", title="Plain", chart_type="table",
+                      query=CardQuery(group_by=["Region"],
+                                      columns=[QueryColumn(column="Revenue",
+                                                           aggregation="SUM")]))]
+    app.pages = [Page(id="p", name="P", card_ids=["1"])]
+    card = build_liveboard_artifacts(app, model_name="M")["mapping"]["cards"][0]
+    assert card["status"] == "Migrated"
+    assert card["dropped_constructs"] == []

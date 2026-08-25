@@ -235,6 +235,12 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
   is exercised by `ts domo signin`, but is deliberately not wired into `parse_app`. See the
   skill's `references/open-items.md` (#3, #4).
 
+  A card's sort, filters (incl. relative dates), quick filters, conditional formatting and
+  number formats are parsed but **not** emitted, so an Answer lands unsorted and unfiltered.
+  That gap is reported rather than hidden: each affected card is downgraded to `Approximated`
+  with the dropped constructs named, and leads the migration report's Manual review section
+  (`open-items.md` #11).
+
 - **`ts-profile-domo` — Domo credential setup** (new skill, v1.0.0). Adds `domo` as a real
   platform to `ts profiles add/list/update/remove/sync-env`: `developer-token` auth, the
   `DOMO_DEVELOPER_TOKEN_{SLUG}` env var, and the `domo-{slug}` keychain service. `ts domo
