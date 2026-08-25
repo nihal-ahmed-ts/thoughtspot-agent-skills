@@ -215,7 +215,39 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
   `client_id`/`client_secret` pair the Databricks CLI reads from
   `~/.databrickscfg`. `chore: bump ts-cli to v0.132.1`
 
----
+### Added
+
+- **`ts-convert-from-domo` — Domo → ThoughtSpot converter** (new skill, v1.0.0). Converts a
+  captured **offline** Domo bundle (dataset schemas, Beast Modes, cards, page) into Table +
+  Model TML, Answers and a tabbed Liveboard via a new `ts domo` command group
+  (`parse` / `build-model` / `build-liveboard` / `report` / `signin`). Beast Mode → ThoughtSpot
+  formula translation with the structural cases (multi-branch `CASE`, window/LOD) flagged
+  rather than silently downgraded; model joins taken from a Magic ETL export (`--etl`) when
+  supplied, else inferred by shared column name and always flagged `NEEDS REVIEW`; a rich
+  `migration_report.md` (executive summary, per-object accounting, chasm-trap warning,
+  verification checklist, modernization scorecard) derived entirely from the build mappings.
+  Ships `agents/shared/schemas/domo-app-ir.md` and
+  `agents/shared/mappings/domo/beastmode-thoughtspot-formula-translation.md`.
+
+  Offline-only by design: a Domo card's *analyzer query* — the measure/dimension/aggregation
+  it plots — is not exposed by any Domo API a token can reach, so live conversion cannot be
+  faithful. `ts_cli/domo/client.py` reaches datasets, pages, card metadata and Beast Modes and
+  is exercised by `ts domo signin`, but is deliberately not wired into `parse_app`. See the
+  skill's `references/open-items.md` (#3, #4).
+
+- **`ts-profile-domo` — Domo credential setup** (new skill, v1.0.0). Adds `domo` as a real
+  platform to `ts profiles add/list/update/remove/sync-env`: `developer-token` auth, the
+  `DOMO_DEVELOPER_TOKEN_{SLUG}` env var, and the `domo-{slug}` keychain service. `ts domo
+  signin` verifies a profile by making one authenticated call and reporting which endpoint
+  families the token reaches, without ever printing the token.
+
+### Changed
+
+- chore: bump ts-cli to v0.133.0 — new `ts domo` command group and `domo` platform support in
+  `ts profiles`.
+- Refactored `ts_cli/domo/{report,build_model,magic_etl,answers}.py` into per-section /
+  per-concern helpers so every function lands under the cyclomatic-complexity cap; output is
+  byte-identical (verified against captured fixture output).
 
 ## 2026-08-06
 

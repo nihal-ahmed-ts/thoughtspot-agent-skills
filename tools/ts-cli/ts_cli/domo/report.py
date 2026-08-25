@@ -1,0 +1,393 @@
+"""Render a human-readable migration report (Markdown) from the mapping JSON(s).
+
+Same rich shape as the rest of the family (qlik/looker): an executive summary and
+a modernization scorecard framing a full per-object accounting, always leading the
+manual-review section so a human sees the gaps first. Pure function: dicts in,
+Markdown string out — every number is derived from the mappings, never invented.
+
+`render_report` composes one `_section_*` helper per report section. Each takes the
+`_Stats` bundle and returns its own lines, so a section can be read, changed or
+tested on its own without walking the whole document.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+_REVIEW = {"NEEDS REVIEW", "Approximated", "Skipped"}
+
+
+def _tally(items: list) -> tuple[int, int, int, int]:
+    """(migrated, approximated, needs_review, skipped)."""
+    m = a = r = s = 0
+    for it in items:
+        st = it.get("status", "Migrated")
+        if st == "Migrated":
+            m += 1
+        elif st == "Approximated":
+            a += 1
+        elif st == "Skipped":
+            s += 1
+        else:
+            r += 1
+    return m, a, r, s
+
+
+def _pct(n: int, d: int) -> int:
+    return round(100 * n / d) if d else 100
+
+
+def _chasm_keys(joins: list) -> list[str]:
+    """Join keys used by >= 2 joins — a multi-fact fan-out (chasm-trap) risk."""
+    counts: dict[str, int] = {}
+    for j in joins:
+        for k in str(j.get("on", "")).split(","):
+            k = k.strip()
+            if k:
+                counts[k] = counts.get(k, 0) + 1
+    return sorted([k for k, c in counts.items() if c >= 2])
+
+
+def _complexity_effort(n_tables: int, n_joins: int) -> tuple[str, str]:
+    if n_joins == 0 and n_tables <= 1:
+        return "Low", "~0.5 engineer-day"
+    if n_tables <= 3 and n_joins <= 3:
+        return "Low–Medium", "~0.5–1 engineer-day"
+    if n_tables <= 8:
+        return "Medium", "~1 engineer-day"
+    return "Medium–High", "~1–2 engineer-days"
+
+
+def _risk_level(needs: int, chasm: list, n_joins: int) -> str:
+    if needs == 0 and not chasm:
+        return "Low"
+    if chasm or n_joins >= 5:
+        return "Medium"
+    return "Low–Medium"
+
+
+# ---------------------------------------------------------------------------
+# Derived numbers — computed once, read by every section
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _Stats:
+    app_name: str
+    mode: str
+    datasets: list
+    joins: list
+    beast: list
+    renamed: list
+    invariants: list
+    cards: list
+    pages: list
+    n_tables: int
+    n_cols: int
+    n_joins: int
+    n_beast: int
+    n_cards: int
+    n_pages: int
+    bm_m: int
+    bm_r: int
+    jn_r: int
+    cd_r: int
+    needs: int
+    automation: int
+    complexity: str
+    effort: str
+    risk: str
+    chasm: list = field(default_factory=list)
+    from_etl: bool = False
+
+
+def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
+    src = mapping.get("source", {})
+    datasets = mapping.get("datasets", [])
+    joins = mapping.get("joins", [])
+    beast = mapping.get("beast_modes", [])
+    cards = (lb_mapping or {}).get("cards", [])
+
+    bm_m, bm_a, bm_r, _bm_s = _tally(beast)
+    jn_m, jn_a, jn_r, _jn_s = _tally(joins)
+    cd_m, cd_a, cd_r, _cd_s = _tally(cards)
+    ds_m, ds_a, ds_r, _ds_s = _tally(datasets)
+
+    n_tables, n_joins, n_beast, n_cards = len(datasets), len(joins), len(beast), len(cards)
+    total = n_tables + n_joins + n_beast + n_cards
+    needs = ds_r + jn_r + bm_r + cd_r
+    chasm = _chasm_keys(joins)
+    complexity, effort = _complexity_effort(n_tables, n_joins)
+
+    return _Stats(
+        app_name=src.get("app_name", "Untitled"),
+        mode=src.get("mode", "offline"),
+        datasets=datasets, joins=joins, beast=beast,
+        renamed=mapping.get("renamed_columns", []),
+        invariants=mapping.get("invariant_findings", []),
+        cards=cards, pages=(lb_mapping or {}).get("pages", []),
+        n_tables=n_tables,
+        n_cols=sum(d.get("columns", 0) for d in datasets),
+        n_joins=n_joins, n_beast=n_beast, n_cards=n_cards,
+        n_pages=len((lb_mapping or {}).get("pages", [])),
+        bm_m=bm_m, bm_r=bm_r, jn_r=jn_r, cd_r=cd_r,
+        needs=needs,
+        automation=_pct(ds_m + jn_m + bm_m + cd_m, total),
+        complexity=complexity, effort=effort,
+        risk=_risk_level(needs, chasm, n_joins),
+        chasm=chasm,
+        from_etl=any(j.get("source") == "magic_etl" for j in joins),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sections
+# ---------------------------------------------------------------------------
+
+def _section_header(st: _Stats) -> list[str]:
+    prov = "data model = **SOURCE** (Domo dataset schemas)"
+    if st.from_etl:
+        prov += " + joins from the **Magic ETL** export"
+    if st.cards:
+        prov += " · charts = **INFERRED** from the dashboard PDF (verify)"
+    return [
+        "# Domo → ThoughtSpot Migration Report",
+        "",
+        f"**App:** {st.app_name}  ",
+        f"**Source mode:** {st.mode}  ",
+        f"**Provenance:** {prov}",
+        "",
+    ]
+
+
+def _section_exec_summary(st: _Stats) -> list[str]:
+    risk_bits = []
+    if st.needs:
+        risk_bits.append(f"{st.needs} item(s) flagged NEEDS REVIEW")
+    if st.chasm:
+        risk_bits.append(
+            "multiple facts share the join key(s) "
+            + ", ".join(f"`{k}`" for k in st.chasm)
+            + " — confirm cardinality to avoid measure fan-out (chasm trap)")
+    if not risk_bits:
+        risk_bits.append("clean conversion — no structural gaps")
+    return [
+        "## Executive summary",
+        "",
+        f"- **Migration complexity:** {st.complexity}",
+        f"- **Automation %:** {st.automation}%  |  **Manual %:** {100 - st.automation}%",
+        f"- **Estimated effort:** {st.effort}",
+        f"- **Risk score:** {st.risk} — " + "; ".join(risk_bits) + ".",
+        "",
+    ]
+
+
+def _section_inventory(st: _Stats) -> list[str]:
+    return [
+        "## Inventory",
+        "",
+        f"- **Tables:** {st.n_tables}  |  **Columns:** {st.n_cols}",
+        f"- **Relationships:** {st.n_joins}  |  **Measures (Beast Modes):** {st.n_beast}",
+        f"- **Pages:** {st.n_pages}  |  **Visuals:** {st.n_cards}",
+        "",
+    ]
+
+
+def _section_modernization(st: _Stats) -> list[str]:
+    n_pages = st.n_pages or 1
+    L = [
+        "## Modernization",
+        "",
+        f"**Dashboards eliminated:** none — the {n_pages} Domo page(s) map to "
+        f"{n_pages} Liveboard(s).",
+        "",
+    ]
+    kpi_cards = [c for c in st.cards if str(c.get("chart_type", "")).lower() == "kpi"]
+    if kpi_cards:
+        L += [f"**Search opportunities:** the {len(kpi_cards)} KPI card(s) "
+              "are re-askable on demand via Search; kept as tiles for the overview band.",
+              ""]
+    L += ["**Spotter opportunities:** stand up Spotter on the model for conversational "
+          "\"explain <measure> by <dimension>\" breakdowns that replace static charts.",
+          "",
+          "**Semantic improvements:**"]
+    if st.bm_m:
+        L.append(f"- Promoted {st.bm_m} Domo Beast Mode(s) to reusable model measures.")
+    if st.bm_r:
+        L.append(f"- Rewrite {st.bm_r} Beast Mode(s) flagged NEEDS REVIEW in ThoughtSpot syntax "
+                 "(see Data model → formulas).")
+    if st.renamed:
+        L.append(f"- Disambiguated {len(st.renamed)} display-name collision(s); join keys stay "
+                 "physically present on both tables so joins resolve.")
+    if st.n_joins:
+        L.append("- Confirm each join is MANY_TO_ONE from the fact so additive measures do not "
+                 "fan out across the star.")
+    L.append("")
+    return L
+
+
+def _section_summary_table(st: _Stats) -> list[str]:
+    L = [
+        "## Summary by object type",
+        "",
+        "| Object type | In Domo | Migrated | Approximated | Needs review | Skipped |",
+        "|---|---|---|---|---|---|",
+    ]
+    for label, items in [("Datasets → Tables", st.datasets), ("Joins", st.joins),
+                         ("Beast Modes → Formulas", st.beast), ("Cards → Answers", st.cards)]:
+        m, a, r, s = _tally(items)
+        L.append(f"| {label} | {len(items)} | {m} | {a} | {r} | {s} |")
+    L.append(f"| Pages → Liveboards | {st.n_pages} | {st.n_pages} | 0 | 0 | 0 |")
+    L.append("")
+    return L
+
+
+def _section_data_model(st: _Stats) -> list[str]:
+    L = ["## Data model", "", "### Tables", "",
+         "| Domo dataset | ThoughtSpot table | Columns | Status |", "|---|---|---|---|"]
+    for d in st.datasets:
+        L.append(f"| {d.get('name')} | {d.get('ts_table')} | {d.get('columns')} | "
+                 f"{d.get('status')} |")
+    L.append("")
+
+    if st.joins:
+        L += ["### Relationships → joins", "",
+              "| Relationship | On | Status | Note |", "|---|---|---|---|"]
+        for j in st.joins:
+            L.append(f"| {j.get('left')} ↔ {j.get('right')} | `{j.get('on')}` | "
+                     f"{j.get('status')} | {j.get('note', '')} |")
+        L.append("")
+
+    if st.beast:
+        L += ["### Beast Modes → Formulas", "",
+              "| Name | Domo formula | ThoughtSpot formula | Status |", "|---|---|---|---|"]
+        for f in st.beast:
+            L.append(f"| {f.get('name')} | `{f.get('domo_formula')}` | "
+                     f"`{f.get('ts_formula')}` | {f.get('status')} |")
+        L.append("")
+    return L
+
+
+def _section_cards(st: _Stats) -> list[str]:
+    L: list[str] = []
+    if st.cards:
+        L += ["## Cards → answers & liveboard", "",
+              "| Card | ThoughtSpot chart | Status | Note |", "|---|---|---|---|"]
+        for c in st.cards:
+            ts_chart = c.get("ts_chart") or str(c.get("chart_type", "")).upper()
+            L.append(f"| {c.get('title', c.get('urn'))} | {ts_chart} | {c.get('status')} "
+                     f"| {c.get('note', '')} |")
+        L.append("")
+        if st.pages:
+            L += [f"Assembled onto Liveboard **{st.pages[0].get('name')}** "
+                  f"({st.pages[0].get('cards')} tiles).", ""]
+
+    if st.renamed:
+        L += ["### Renamed columns (display-name collisions)", ""]
+        for rc in st.renamed:
+            L.append(f"- `{rc.get('from')}` → `{rc.get('to')}` (table {rc.get('table')})")
+        L.append("")
+    return L
+
+
+def _review_rows(st: _Stats) -> list[str]:
+    rows: list[str] = []
+    for j in st.joins:
+        if j.get("status") in _REVIEW:
+            rows.append(
+                f"- **Join** {j.get('left')} ↔ {j.get('right')} on `{j.get('on')}` "
+                f"({j.get('status')}) — {j.get('note', '')}. Confirm MANY_TO_ONE from the fact.")
+    if st.chasm:
+        rows.append(
+            "- **Chasm-trap risk** — multiple facts share "
+            + ", ".join(f"`{k}`" for k in st.chasm)
+            + ". Keep each measure on its home fact (or split into separate Answers) so "
+            "counts/sums do not fan out.")
+    for f in st.beast:
+        if f.get("status") in _REVIEW:
+            rows.append(
+                f"- **Formula** `{f.get('name')}` ({f.get('status')}) — "
+                f"{f.get('note') or 'manual rewrite required'}  \n"
+                f"  Domo: `{f.get('domo_formula')}`")
+    for c in st.cards:
+        if c.get("status") in _REVIEW:
+            rows.append(
+                f"- **Card** `{c.get('title', c.get('urn'))}` ({c.get('chart_type')}, "
+                f"{c.get('status')}) — {c.get('note') or 'rebuild in ThoughtSpot'}")
+    for m in st.invariants:
+        rows.append(f"- **TML invariant** — {m}")
+    return rows
+
+
+def _section_manual_review(st: _Stats) -> list[str]:
+    rows = _review_rows(st)
+    return ["## Manual review (do these in ThoughtSpot)", ""] + (
+        rows if rows else ["_Nothing flagged — every object migrated cleanly._"]) + [""]
+
+
+def _section_checklist(st: _Stats) -> list[str]:
+    L = ["## Verification checklist", "",
+         "- Pick one known total in Domo and confirm the identical number in ThoughtSpot "
+         "(via Search / searchdata)."]
+    if st.n_joins:
+        L.append("- Slice a measure by a dimension across each join and confirm it does not "
+                 "fan out (validates the join cardinality).")
+    if st.bm_r:
+        L.append("- Confirm every NEEDS REVIEW Beast Mode resolves correctly after its rewrite.")
+    if st.cd_r:
+        L.append("- Rebuild each flagged card and confirm it matches the source dashboard tile.")
+    L += ["- Confirm any source filters became Liveboard filters and slice every tile.", ""]
+    return L
+
+
+def _section_scorecard(st: _Stats) -> list[str]:
+    sem = max(60, 90 - (10 if st.jn_r else 0) - (10 if st.chasm else 0))
+    search = max(60, 90 - 5 * st.bm_r)
+    spotter = 85 if st.n_beast else 75
+    lb = max(60, 90 - 5 * st.cd_r)
+    ai = 80 if st.n_beast else 70
+    n_pages = st.n_pages or 1
+    return [
+        "## ThoughtSpot Modernization Scorecard",
+        "",
+        "| Category | Score | Recommendation |",
+        "|---|---|---|",
+        f"| Semantic Model | {sem}/100 | "
+        + ("Confirm MANY_TO_ONE cardinalities"
+           + (" and resolve the chasm trap" if st.chasm else "")
+           + " to lock the grain." if st.n_joins else
+           "Flat, clean dataset; promote categoricals to model formulas.") + " |",
+        f"| Search Readiness | {search}/100 | "
+        + ("Friendly names + reusable measures in place; finish the flagged formula rewrites."
+           if st.bm_r else "Friendly names + reusable measures in place.") + " |",
+        f"| Spotter Readiness | {spotter}/100 | "
+        "Stand up Spotter on the model to replace static breakdown charts. |",
+        f"| Liveboards | {lb}/100 | "
+        + (f"{n_pages} page(s) → {n_pages} Liveboard(s)"
+           + ("; rebuild the flagged tile(s) to reach 100." if st.cd_r else ".")) + " |",
+        f"| AI Readiness | {ai}/100 | "
+        "Add a Monitor/Alert on a key measure and enable Spotter. |",
+        "",
+    ]
+
+
+_SECTIONS = (
+    _section_header,
+    _section_exec_summary,
+    _section_inventory,
+    _section_modernization,
+    _section_summary_table,
+    _section_data_model,
+    _section_cards,
+    _section_manual_review,
+    _section_checklist,
+    _section_scorecard,
+)
+
+
+def render_report(mapping: dict, lb_mapping: Optional[dict] = None) -> str:
+    """Render the full Markdown migration report from the build mapping(s)."""
+    st = _compute_stats(mapping, lb_mapping)
+    lines: list[str] = []
+    for section in _SECTIONS:
+        lines.extend(section(st))
+    return "\n".join(lines)

@@ -1,0 +1,120 @@
+---
+name: ts-profile-domo
+description: Set up and manage Domo connection profiles for the Domo → ThoughtSpot converter. Use when configuring a new Domo instance for dashboard migration, updating credentials, or testing whether an existing profile works. Uses a Domo developer access token, stored in the OS keychain — never in a file or this conversation.
+---
+
+# Domo Profile Setup
+
+Manage Domo connection profiles via the `ts profiles` CLI. The token is stored in the OS
+credential store (macOS Keychain / Windows Credential Manager / Linux Secret Service) and read at
+runtime from an env var with a keychain fallback — never written to a profile file and never
+echoed in this conversation.
+
+Ask one question at a time for **dependent** decisions; batch **independent** questions — profile
+name and instance URL can be collected together.
+
+**What the profile is for.** `ts_cli/domo/client.py` reads Domo's **internal** endpoints — the
+ones the Domo web app itself calls — to enumerate datasets, pages, card metadata and Beast Modes.
+That is genuinely useful for *capturing* a bundle, but note the boundary: a card's **analyzer
+query** is not exposed by any Domo endpoint a token can reach, so `/ts-convert-from-domo` still
+converts from an **offline bundle on disk**, not live. See
+[../ts-convert-from-domo/references/open-items.md](../ts-convert-from-domo/references/open-items.md).
+
+---
+
+## Prerequisites
+
+- `ts` CLI installed: `pip install -e tools/ts-cli`
+- A Domo **developer access token** for the instance (Domo → Admin → Authentication → Access
+  Tokens). This is the credential `client.py` sends as `X-DOMO-Developer-Token`.
+- Admin rights on the Domo instance to mint that token.
+
+---
+
+## On Invocation
+
+Ask: **Add, List, Test, or Remove a Domo profile?**
+
+## Add
+
+### Step 1 — Collect profile details (batch)
+
+1. **Profile name** — e.g. `acme-domo`
+2. **Instance URL** — e.g. `https://acme.domo.com`
+
+Auth method is always `developer-token`; there is no second option to ask about.
+
+### Step 2 — Save profile and derive credential locations
+
+```bash
+ts profiles add \
+  --platform domo \
+  --name "{PROFILE_NAME}" \
+  --auth-type developer-token \
+  --field instance={INSTANCE_URL}
+```
+
+Parse the JSON output. It contains `env_var` (`DOMO_DEVELOPER_TOKEN_{SLUG}`),
+`keychain_service` (`domo-{slug}`), `keychain_account` (`developer-token`),
+`keychain_store_commands`, `keychain_verify_commands`, `zshenv_line`, and
+`windows_env_commands`.
+
+### Step 3 — Store the token
+
+**Never accept the token in this conversation.**
+
+Show the user the keychain store command for their platform from the `keychain_store_commands`
+in the Step 2 output, replacing `VALUE` with `PASTE_TOKEN_HERE`. Tell them to run it in their own
+terminal. Then have them add the `zshenv_line` (macOS/Linux) or run the `windows_env_commands`
+so the token resolves from the env var without a keychain prompt on every call.
+
+### Step 4 — Verify
+
+```bash
+ts domo signin --profile "{PROFILE_NAME}"
+```
+
+Makes one authenticated call and reports which endpoint families the token actually reaches
+(`datasets`, `pages`) — never printing the token. A `FAILED:` entry for both means the token or
+instance URL is wrong; a partial result means the token is valid but scoped narrowly, which is
+worth telling the user before they rely on it.
+
+## Test
+
+```bash
+ts domo signin --profile "{PROFILE_NAME}"
+```
+
+## List
+
+```bash
+ts profiles list --domo
+```
+
+Shows profile names, auth method and instance URLs only — never secrets.
+
+## Remove
+
+```bash
+ts profiles remove --platform domo --name "{PROFILE_NAME}"
+```
+
+Removes the profile entry. Tell the user the keychain item and env var persist — deleting those
+is theirs to do (`security delete-generic-password -s "domo-{slug}" -a developer-token` on
+macOS), and removing the `~/.zshenv` export line.
+
+---
+
+## Guardrails
+- Never enter the developer token in this conversation — always via the keychain command in the
+  user's own terminal.
+- `ts profiles list` and `--json` output strip credential fields; logs never print the token.
+- The token is held in memory only for the duration of a call.
+
+---
+
+## Changelog
+
+| Version | Date | Summary |
+|---|---|---|
+| 1.0.0 | 2026-08-26 | Initial release. `domo` added as a platform to `ts profiles add/list/update/remove/sync-env` (developer-token auth, `DOMO_DEVELOPER_TOKEN_{SLUG}` env var, `domo-{slug}` keychain service); `ts domo signin` verifies a profile without printing the token. |
