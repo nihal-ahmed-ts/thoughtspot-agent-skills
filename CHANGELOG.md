@@ -270,7 +270,10 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
   reaches the risk score, verification checklist and scorecard, not just Manual review.
   Plus: the structural-construct check no longer misfires on columns named "Case …";
   id-like join-key detection no longer matches `Paid`/`Void`/`Valid`; `DATEDIFF` arity is
-  checked (`open-items.md` #16–#21).
+  checked (`open-items.md` #16–#21). Self-review pass: the Beast Mode naming rule is no
+  longer derived in two places (the divergence that caused #16), `BeastMode.status` is
+  honoured instead of ignored, and card column aliases are documented as unmapped
+  (`open-items.md` #22).
 
 - **`ts-profile-domo` — Domo credential setup** (new skill, v1.0.0). Adds `domo` as a real
   platform to `ts profiles add/list/update/remove/sync-env`: `developer-token` auth, the

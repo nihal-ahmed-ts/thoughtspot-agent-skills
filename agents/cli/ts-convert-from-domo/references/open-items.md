@@ -286,3 +286,28 @@ Approximated. The shipped fixture reports Medium / 66-100 instead of Low / 90-10
 - **`_APPROXIMATE_MARKERS` was dead**, with `_formula_status` re-inlining the same three
   substrings. The constant now carries marker → caveat and is the single source.
 
+## #22 — Self-review after the second round — VERIFIED (fixed)
+
+Found by auditing my own round-2 changes the same way, rather than waiting for a third
+review pass:
+
+- **The naming rule had been reintroduced in two places.** `naming._index_formulas` and
+  `build_model._dedupe_beast_modes` each derived the Beast Mode set and dedup rule
+  independently — precisely the divergence that caused #16. `naming.deduped_beast_modes`
+  is now the single definition and `build_model` consumes it.
+  `tests/test_domo_binding.py::TestOneSourceOfTruth` asserts the two stages agree on the
+  exact name set, so the collapse cannot silently come back.
+- **`BeastMode.status` was parsed and ignored.** Domo marks a broken Beast Mode with
+  `status != VALID`; it was translated as though it worked. Now emitted `NEEDS REVIEW`
+  with the Domo status quoted — the same "parsed but never consumed" pattern as the
+  `relationshipType` finding (#19), found by diffing IR fields the parser populates
+  against fields any consumer reads.
+- **`QueryColumn.alias` is unmapped and now says so.** An Answer's `answer_columns` must
+  name Model columns, so a card-local display label cannot be carried without
+  model-level aliasing. Documented in the coverage matrix along with `description` and
+  the Beast Mode `global` flag. Domo's `orderBy` references the **alias**, not the
+  column, so the dropped-sort note now marks it as such — otherwise the reader hunts for
+  a column that does not exist.
+- The committed `migration-report.example.md` had gone stale against that note. Docs that
+  are generated are now regenerated as part of the change, not after it.
+

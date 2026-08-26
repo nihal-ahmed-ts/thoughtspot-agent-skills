@@ -214,3 +214,47 @@ class TestBindingUnderRenames:
         row = [f for f in arts["mapping"]["beast_modes"] if f["name"] == "Bogus"][0]
         assert row["status"] == "NEEDS REVIEW"
         assert "does not expose" in row["note"]
+
+
+class TestOneSourceOfTruth:
+    """The naming rule must be computed in exactly one place.
+
+    Findings 1/2 in the PR #440 re-review were caused by two stages deriving the same
+    rule independently and drifting. These pin the collapse so it cannot silently
+    come back.
+    """
+
+    @pytest.mark.parametrize("bundle", BUNDLES, ids=["domo", "domo_edge"])
+    def test_every_translated_formula_has_an_indexed_name(self, bundle):
+        from ts_cli.domo.naming import build_column_index, deduped_beast_modes
+
+        app = parse_app(bundle)
+        index = build_column_index(app)
+        arts = build_model_artifacts(app, connection_name="C", db="D", schema="S",
+                                     model_name="M")
+        emitted = {f["name"] for f in arts["model"]["tml"]["model"]["formulas"]}
+        # The index and the translation loop must agree on the exact name set.
+        assert emitted == index.formula_names
+
+    @pytest.mark.parametrize("bundle", BUNDLES, ids=["domo", "domo_edge"])
+    def test_dedupe_is_shared_not_reimplemented(self, bundle):
+        from ts_cli.domo.naming import deduped_beast_modes
+
+        app = parse_app(bundle)
+        arts = build_model_artifacts(app, connection_name="C", db="D", schema="S",
+                                     model_name="M")
+        assert len(arts["mapping"]["beast_modes"]) == len(deduped_beast_modes(app))
+
+    def test_index_formula_names_are_unique(self):
+        """A duplicate name means a duplicate formula id, hence a dangling reference."""
+        from ts_cli.domo.naming import build_column_index
+
+        app = DomoApp(app_name="D", source="-", extraction_mode="offline")
+        app.datasets = [Dataset(id=f"d{i}", name=f"T{i}", rows=10,
+                                columns=[DomoColumn("v", "DOUBLE")]) for i in range(3)]
+        app.beast_modes = [BeastMode(id=i, name="Same", formula="SUM(`v`)",
+                                     data_source_id=f"d{i}") for i in range(3)]
+        index = build_column_index(app)
+        names = [index.formula(f"d{i}", "Same") for i in range(3)]
+        assert len(set(names)) == 3, f"formula names collided: {names}"
+

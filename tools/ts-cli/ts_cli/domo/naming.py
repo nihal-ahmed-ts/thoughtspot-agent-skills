@@ -127,32 +127,43 @@ def build_column_index(app: DomoApp) -> ColumnIndex:
     return index
 
 
-def _index_formulas(app: DomoApp, index: ColumnIndex) -> None:
-    """Resolve Beast Mode names, in place.
+def deduped_beast_modes(app: DomoApp) -> list:
+    """Global Beast Modes then card-local calculated fields, deduped by (dataset, name).
 
-    Mirrors `_translate_beast_modes`: global Beast Modes then card-local calculated
-    fields, deduped by (dataset, name); a name used by more than one dataset is
-    disambiguated with the dataset name. `build_model_tml` derives each formula's id
-    from this name, so it must be unique.
+    The ONE definition of "which Beast Modes exist". `build_model` consumes this rather
+    than re-deriving it: the naming rule below and the translation loop must agree on
+    both the set and its order, or the formula ids stop matching the references — which
+    is the class of divergence that produced the wrong-table bindings in the first place.
     """
     all_bm = list(app.beast_modes)
     for card in app.cards:
         all_bm.extend(card.calc_fields)
-
-    ds_name = {d.id: d.name for d in app.datasets}
-    counts: dict[str, int] = {}
-    for bm in all_bm:
-        if bm.name:
-            counts[bm.name] = counts.get(bm.name, 0) + 1
-
     seen: set = set()
-    used: set = set()
+    out = []
     for bm in all_bm:
         key = (bm.data_source_id or "", bm.name)
         if not bm.name or key in seen:
             continue
         seen.add(key)
+        out.append(bm)
+    return out
 
+
+def _index_formulas(app: DomoApp, index: ColumnIndex) -> None:
+    """Resolve Beast Mode display names, in place.
+
+    A name used by more than one dataset is disambiguated with the dataset name.
+    `build_model_tml` derives each formula's id from this name, so it must be unique.
+    """
+    all_bm = deduped_beast_modes(app)
+    ds_name = {d.id: d.name for d in app.datasets}
+    counts: dict[str, int] = {}
+    for bm in all_bm:
+        counts[bm.name] = counts.get(bm.name, 0) + 1
+
+    used: set = set()
+    for bm in all_bm:
+        key = (bm.data_source_id or "", bm.name)
         name = bm.name
         if counts.get(bm.name, 0) > 1 and name in used:
             suffix = ds_name.get(bm.data_source_id) or str(bm.data_source_id)

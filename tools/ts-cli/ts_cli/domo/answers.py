@@ -134,7 +134,9 @@ def _answer(card: Card, model_name: str, model_fqn: Optional[str],
 def _describe_sort(card: Card) -> Optional[str]:
     if not card.query.order_by:
         return None
-    return "sort (%s)" % ", ".join(
+    # Domo's orderBy names the card's column ALIAS ("Total Revenue"), not the underlying
+    # column ("Net Revenue"). Say so, or the reader hunts for a column that doesn't exist.
+    return "sort (%s — Domo alias)" % ", ".join(
         f"{o.column} {o.order}".strip() for o in card.query.order_by)
 
 

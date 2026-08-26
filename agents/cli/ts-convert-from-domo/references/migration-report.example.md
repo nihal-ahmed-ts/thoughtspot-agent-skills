@@ -68,8 +68,8 @@
 | Card | ThoughtSpot chart | Status | Note |
 |---|---|---|---|
 | Net Revenue | KPI | Approximated | not carried onto the Answer — rebuild by hand: card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Region); conditional formatting (1 rule(s)) |
-| Revenue by Region | BAR | Approximated | not carried onto the Answer — rebuild by hand: sort (Total Revenue DESCENDING); card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Product Category) |
-| Sales Rep Performance | TABLE | Approximated | not carried onto the Answer — rebuild by hand: sort (Net Revenue DESCENDING); card filter(s) (Transaction Date LAST_90_DAYS); number format on Net Revenue, Avg Order Value, Discount Rate %; non-SUM aggregation (Avg Order Value=AVG, Discount Rate %=AVG) — the Answer falls back to the Model default |
+| Revenue by Region | BAR | Approximated | not carried onto the Answer — rebuild by hand: sort (Total Revenue DESCENDING — Domo alias); card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Product Category) |
+| Sales Rep Performance | TABLE | Approximated | not carried onto the Answer — rebuild by hand: sort (Net Revenue DESCENDING — Domo alias); card filter(s) (Transaction Date LAST_90_DAYS); number format on Net Revenue, Avg Order Value, Discount Rate %; non-SUM aggregation (Avg Order Value=AVG, Discount Rate %=AVG) — the Answer falls back to the Model default |
 
 Assembled onto Liveboard **Sales Overview** (3 tiles).
 
@@ -81,8 +81,8 @@ Assembled onto Liveboard **Sales Overview** (3 tiles).
 
 - **Join** Sample Sales Transactions ↔ Customer Master on `Customer ID` (NEEDS REVIEW) — inferred by shared column name. Confirm MANY_TO_ONE from the fact.
 - **Card** `Net Revenue` (kpi, Approximated) — not carried onto the Answer — rebuild by hand: card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Region); conditional formatting (1 rule(s))
-- **Card** `Revenue by Region` (bar, Approximated) — not carried onto the Answer — rebuild by hand: sort (Total Revenue DESCENDING); card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Product Category)
-- **Card** `Sales Rep Performance` (table, Approximated) — not carried onto the Answer — rebuild by hand: sort (Net Revenue DESCENDING); card filter(s) (Transaction Date LAST_90_DAYS); number format on Net Revenue, Avg Order Value, Discount Rate %; non-SUM aggregation (Avg Order Value=AVG, Discount Rate %=AVG) — the Answer falls back to the Model default
+- **Card** `Revenue by Region` (bar, Approximated) — not carried onto the Answer — rebuild by hand: sort (Total Revenue DESCENDING — Domo alias); card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Product Category)
+- **Card** `Sales Rep Performance` (table, Approximated) — not carried onto the Answer — rebuild by hand: sort (Net Revenue DESCENDING — Domo alias); card filter(s) (Transaction Date LAST_90_DAYS); number format on Net Revenue, Avg Order Value, Discount Rate %; non-SUM aggregation (Avg Order Value=AVG, Discount Rate %=AVG) — the Answer falls back to the Model default
 
 ## Verification checklist
 

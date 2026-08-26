@@ -14,7 +14,7 @@ from ts_cli.model_builder import build_model_tml
 
 from .functions import translate
 from .ir import Dataset, DomoApp
-from .naming import ColumnIndex, build_column_index
+from .naming import ColumnIndex, build_column_index, deduped_beast_modes
 
 # Domo dataset type -> ThoughtSpot data_type
 _TYPE_MAP = {
@@ -241,22 +241,6 @@ def _formula_status(ts_expr: str, review: bool) -> tuple[str, str]:
     return "Migrated", ""
 
 
-def _dedupe_beast_modes(app: DomoApp) -> list:
-    """Global Beast Modes then card-local calculated fields, deduped by (dataset, name)."""
-    all_bm = list(app.beast_modes)
-    for card in app.cards:
-        all_bm.extend(card.calc_fields)
-    seen: set = set()
-    out = []
-    for bm in all_bm:
-        key = (bm.data_source_id or "", bm.name)
-        if not bm.name or key in seen:
-            continue
-        seen.add(key)
-        out.append(bm)
-    return out
-
-
 def _translate_one(bm, index: ColumnIndex) -> tuple[str, str, list[str]]:
     """Translate one Beast Mode. Returns (ts_expr, status, notes)."""
     ts_expr, review, reason = translate(bm.formula)
@@ -273,6 +257,15 @@ def _translate_one(bm, index: ColumnIndex) -> tuple[str, str, list[str]]:
             + ", ".join(sorted(set(unresolved)))] if x)
 
     status, extra = _formula_status(ts_expr, review)
+
+    # Domo itself marks a broken Beast Mode (status != VALID). Translating it as though
+    # it were fine ships a formula the SOURCE already knows does not work.
+    declared = (getattr(bm, "status", None) or "").strip().upper()
+    if declared and declared != "VALID":
+        status = "NEEDS REVIEW"
+        extra = "; ".join(x for x in [
+            extra, f"Domo reports this Beast Mode as {declared} (not VALID) — fix it in "
+                   "Domo, or rewrite it here"] if x)
 
     # A flagged formula is emitted VERBATIM — by definition not valid ThoughtSpot
     # syntax. Left bare it makes the whole model TML unimportable, so the user loses
@@ -296,7 +289,7 @@ def _translate_beast_modes(app: DomoApp, index: ColumnIndex) -> tuple[list, list
     translated: list[dict] = []
     mapping_formulas: list[dict] = []
 
-    for bm in _dedupe_beast_modes(app):
+    for bm in deduped_beast_modes(app):
         name = index.formula(bm.data_source_id, bm.name) or bm.name
         ts_expr, status, notes = _translate_one(bm, index)
         if name != bm.name:

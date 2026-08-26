@@ -78,6 +78,10 @@ migration report.
 | Card `conditionalFormats[]` | Not emitted | Parsed into the IR, then dropped — reported per card |
 | Page `collectionIds` / `children` → Liveboard tabs | No `tabs` node is emitted — the Liveboard is a single page of tiles | `answers.py` emits `layout.tiles` only |
 | Domo pages 2..n | Only the first page becomes a Liveboard | Each later page and every card on it is reported `Skipped` with the page named |
+| Card `columns[].alias` (the tile's display label) | No label override is emitted | An Answer's `answer_columns` must name Model columns, so a card-local label cannot be carried without model-level aliasing. The Answer shows the underlying column name. Note Domo's `orderBy` references the **alias**, which is why the dropped-sort note quotes it as such |
+| Beast Mode `status` other than `VALID` | Not translated as valid | Domo already marks the Beast Mode broken; it is emitted `NEEDS REVIEW` with the Domo status quoted rather than shipped as though it worked |
+| Dataset / card `description` | Not emitted into TML | No `description` is written on the Table, Model or Answer |
+| Beast Mode `global` flag | Not used | Global and card-local Beast Modes are treated identically (deduped by dataset + name) |
 | Card `columns[].aggregation` other than `SUM` (`MIN`/`MAX`/`AVG`/`COUNT`) | No aggregation is emitted onto the Answer | The Answer falls back to the Model default (SUM for numerics), so a `MIN(Price)` card would read as `SUM(Price)`. Reported per card as `Approximated` |
 | Domo column `format` (CURRENCY / NUMBER / percent / precision) | No number format is emitted | Parsed into the IR, then dropped — reported per card |
 | Card drill paths and card-to-card links | No ThoughtSpot equivalent modelled yet | Deferred |
