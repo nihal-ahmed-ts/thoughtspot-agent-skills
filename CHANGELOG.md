@@ -256,6 +256,22 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
   provenance. Empty parses no longer render as "Automation 100% — clean conversion"
   (`open-items.md` #12–#15).
 
+  Second review round: column and Beast Mode renames now cross the stage boundary. A new
+  `ts_cli/domo/naming.py` owns the collision rule as a pure function of the parsed IR, so
+  `build-model` and `build-liveboard` — separate CLI invocations that each re-parse the
+  bundle — resolve names identically without a file handshake. This closes two
+  wrong-numbers bugs: a Beast Mode on the second dataset read the first dataset's column
+  of the same name, and an Answer on the second dataset grouped by the first dataset's
+  column. A reference that resolves to nothing the Model exposes is flagged, not shipped.
+  Flagged formulas are wrapped in `/* TODO review: … */` so one untranslatable measure no
+  longer makes the whole model TML unimportable. Cards on Domo pages 2..n are reported
+  `Skipped` instead of vanishing. Magic ETL `relationshipType` is honoured, with a Domo
+  many-to-many warned about rather than flattened to MANY_TO_ONE. `Approximated` now
+  reaches the risk score, verification checklist and scorecard, not just Manual review.
+  Plus: the structural-construct check no longer misfires on columns named "Case …";
+  id-like join-key detection no longer matches `Paid`/`Void`/`Valid`; `DATEDIFF` arity is
+  checked (`open-items.md` #16–#21).
+
 - **`ts-profile-domo` — Domo credential setup** (new skill, v1.0.0). Adds `domo` as a real
   platform to `ts profiles add/list/update/remove/sync-env`: `developer-token` auth, the
   `DOMO_DEVELOPER_TOKEN_{SLUG}` env var, and the `domo-{slug}` keychain service. `ts domo

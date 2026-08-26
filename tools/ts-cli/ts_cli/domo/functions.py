@@ -8,6 +8,7 @@ substitute. `translate()` returns (ts_formula, review_required, reason).
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 from ts_cli.formula_common import wrap_passthrough_calls
 
@@ -95,6 +96,45 @@ _COUNT_DISTINCT = re.compile(
     r"\bcount\s*\(\s*distinct\s+(\[[^\]]+\])\s*\)", re.IGNORECASE)
 _FUNC_TOKEN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
+# `[Bracketed Identifier]` and quoted literals — masked out before the structural
+# check so their contents can never look like SQL keywords.
+_IDENTIFIER_OR_LITERAL = re.compile(r"\[[^\]]*\]|'[^']*'|\"[^\"]*\"")
+
+
+def _strip_identifiers(expr: str) -> str:
+    """Blank out bracketed identifiers and string literals."""
+    return _IDENTIFIER_OR_LITERAL.sub(" ", expr)
+
+
+# Domo functions whose ThoughtSpot counterpart takes a fixed argument count. A rename
+# alone is not enough: Domo's `DATEDIFF('month', a, b)` carries a grain argument that
+# `diff_days` has no parameter for, so the rename produced a 3-arg call to a 2-arg
+# function — invalid, and graded Approximated.
+_ARITY: dict[str, tuple[int, str]] = {
+    "diff_days": (2, "Domo DATEDIFF carries a grain argument (e.g. 'month') that "
+                     "ThoughtSpot's diff_days has no parameter for — rewrite using the "
+                     "matching diff_* function or a date-part expression"),
+}
+
+
+def _arity_of(call: str, expr: str) -> Optional[int]:
+    """Count top-level arguments of the first `call(` in `expr`, or None."""
+    i = expr.lower().find(call + "(")
+    if i < 0:
+        return None
+    depth, args, seen = 0, 1, False
+    for ch in expr[i + len(call):]:
+        if ch == "(":
+            depth += 1
+            seen = True
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        elif ch == "," and depth == 1:
+            args += 1
+    return args if seen else None
+
 
 def translate(expr: str) -> tuple[str, bool, str]:
     """Translate a Domo Beast Mode expression into a ThoughtSpot formula."""
@@ -104,21 +144,25 @@ def translate(expr: str) -> tuple[str, bool, str]:
     reasons: list[str] = []
     review = False
 
-    # 0. structural constructs the token translator can't faithfully rewrite
-    #    (multi-branch CASE, window/OVER) -> emit verbatim, flag for manual rewrite.
-    if _UNSUPPORTED_RE.search(expr):
-        return expr, True, ("contains CASE / window construct — ThoughtSpot has no CASE "
-                            "syntax; manual rewrite required")
-
-    # 1. column refs: `Col Name` -> [Col Name]
+    # 1. column refs: `Col Name` -> [Col Name]. This runs FIRST so the structural
+    #    check below can ignore identifiers: a column named "Case Volume" or
+    #    "Cases Closed" must not be mistaken for SQL `CASE` (common in CRM/support
+    #    data, and flagging it emitted the formula verbatim-with-backticks, which
+    #    broke the whole model import).
     out = _BACKTICK.sub(lambda m: f"[{m.group(1)}]", expr)
-    # 2. COUNT(DISTINCT [x]) -> unique count([x])
+
+    # 2. structural constructs the token translator can't faithfully rewrite
+    #    (any CASE form, window/OVER) -> emit verbatim, flag for manual rewrite.
+    if _UNSUPPORTED_RE.search(_strip_identifiers(out)):
+        return out, True, ("contains CASE / window construct — ThoughtSpot has no CASE "
+                            "syntax; manual rewrite required")
+    # 3. COUNT(DISTINCT [x]) -> unique count([x])
     #    ThoughtSpot's distinct-count formula function is `unique count` (a space,
     #    NOT an underscore); `unique_count`/`count_distinct` are rejected by the
     #    formula parser.
     out = _COUNT_DISTINCT.sub(lambda m: f"unique count({m.group(1)})", out)
 
-    # 3. function-name remap (Domo -> ThoughtSpot); flag unknown / unsupported
+    # 4. function-name remap (Domo -> ThoughtSpot); flag unknown / unsupported
     def _repl(m: re.Match) -> str:
         nonlocal review
         fn = m.group(1)
@@ -140,9 +184,16 @@ def translate(expr: str) -> tuple[str, bool, str]:
 
     out = _FUNC_TOKEN.sub(_repl, out)
 
-    # 4. BL-171: markers -> sql_string_op pass-throughs. An unresolved marker
+    # 5. BL-171: markers -> sql_string_op pass-throughs. An unresolved marker
     #    (wrong arity, unbalanced parens) is flagged rather than emitted — a bare
     #    upper/trim/replace call is rejected at import with error_code 14516.
+    for call, (expected, advice) in _ARITY.items():
+        found = _arity_of(call, out)
+        if found is not None and found != expected:
+            review = True
+            reasons.append(f"'{call}' called with {found} argument(s), expected "
+                           f"{expected} — {advice}")
+
     out, unresolved = wrap_passthrough_calls(out, PASSTHROUGH_MAP)
     if unresolved:
         review = True

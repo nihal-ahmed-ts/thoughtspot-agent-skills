@@ -13,6 +13,7 @@ import uuid
 from typing import Optional
 
 from .ir import Card, DomoApp
+from .naming import ColumnIndex, build_column_index
 
 # Domo chartType -> ThoughtSpot chart.type (verified enum, thoughtspot-chart-types.md)
 _CHART_MAP = {
@@ -26,20 +27,44 @@ def _slug(s: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in (s or "")).strip("_") or "obj"
 
 
-def _ordered_columns(card: Card) -> tuple[list[str], list[str], list[str]]:
-    """Return (attrs, measures, ordered) — group-by first, then measures, deduped."""
+def _ordered_columns(card: Card,
+                     index: ColumnIndex) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Return (attrs, measures, ordered, unresolved) — group-by first, then measures.
+
+    Names are resolved through the shared ColumnIndex, scoped to the card's own
+    dataset. Emitting the raw Domo name meant a card on the second dataset grouped by
+    the FIRST dataset's column of the same name — a clean import with wrong numbers.
+    """
     attrs: list[str] = []
     measures: list[str] = []
+    unresolved: list[str] = []
     seen: set = set()
+
+    def _resolve(raw: str) -> str:
+        # A card column is either a dataset column or a Beast Mode (a Model formula).
+        # Both may have been renamed, and both are resolved from the same index.
+        resolved = index.resolve(card.data_set_id, raw)
+        if resolved is None:
+            unresolved.append(raw)
+            return raw
+        return resolved
+
     for g in card.query.group_by:
-        if g and g not in seen:
-            seen.add(g)
-            attrs.append(g)
+        if not g:
+            continue
+        name = _resolve(g)
+        if name not in seen:
+            seen.add(name)
+            attrs.append(name)
     for c in card.query.columns:
-        if c.column and c.column not in seen:
-            seen.add(c.column)
-            (attrs if c.column in card.query.group_by else measures).append(c.column)
-    return attrs, measures, attrs + measures
+        if not c.column:
+            continue
+        name = _resolve(c.column)
+        if name in seen:
+            continue
+        seen.add(name)
+        (attrs if c.column in card.query.group_by else measures).append(name)
+    return attrs, measures, attrs + measures, unresolved
 
 
 def _search_query(card: Card, ordered: list[str], ctype: str) -> str:
@@ -90,12 +115,19 @@ def _apply_display_mode(answer: dict, card: Card, ctype: str, attrs: list[str],
     return True, f"unmapped Domo chartType '{card.chart_type}' — rendered as table"
 
 
-def _answer(card: Card, model_name: str, model_fqn: Optional[str]) -> tuple[dict, bool, str]:
-    attrs, measures, ordered = _ordered_columns(card)
+def _answer(card: Card, model_name: str, model_fqn: Optional[str],
+            index: ColumnIndex) -> tuple[dict, bool, str]:
+    attrs, measures, ordered, unresolved = _ordered_columns(card, index)
     ctype = card.chart_type.lower()
     answer = _answer_shell(card, model_name, model_fqn, ordered,
                            _search_query(card, ordered, ctype))
     review, reason = _apply_display_mode(answer, card, ctype, attrs, measures, ordered)
+    if unresolved:
+        review = True
+        reason = "; ".join(x for x in [
+            reason,
+            "references column(s) the Model does not expose: "
+            + ", ".join(sorted(set(unresolved)))] if x)
     return answer, review, reason
 
 
@@ -191,9 +223,39 @@ def _card_mapping_row(card: Card, ans: dict, review: bool, reason: str,
     }
 
 
+def _report_skipped_pages(app: DomoApp, card_by_urn: dict,
+                          mapping_cards: list[dict]) -> list[dict]:
+    """Record every Domo page after the first, and its cards, as Skipped.
+
+    Only the FIRST page becomes a Liveboard (declared in the coverage matrix). Cards on
+    later pages used to disappear with no mapping row at all, so the report could not
+    mention them and still asserted "the 1 Domo page(s) map to 1 Liveboard(s)".
+    """
+    skipped_pages: list[dict] = []
+    for extra in app.pages[1:]:
+        skipped_pages.append({
+            "name": extra.name, "cards": len(extra.card_ids), "status": "Skipped",
+            "note": "only the first Domo page is converted to a Liveboard — rebuild "
+                    "this page separately"})
+        for urn in extra.card_ids:
+            other = card_by_urn.get(str(urn))
+            mapping_cards.append({
+                "urn": str(urn),
+                "title": other.title if other else str(urn),
+                "chart_type": other.chart_type if other else "",
+                "ts_chart": "",
+                "status": "Skipped",
+                "note": f"on Domo page '{extra.name}', which is not converted — only "
+                        "the first page becomes a Liveboard",
+                "dropped_constructs": [],
+            })
+    return skipped_pages
+
+
 def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
                               model_fqn: Optional[str] = None,
                               report_name: Optional[str] = None) -> dict:
+    index = build_column_index(app)
     page = app.pages[0] if app.pages else None
     report_name = report_name or (page.name if page else app.app_name) or "Domo Liveboard"
     order = page.card_ids if page else [c.urn for c in app.cards]
@@ -212,7 +274,7 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
                                   "note": "card id in page not found among cards"})
             continue
         idx += 1
-        ans, review, reason = _answer(card, model_name, model_fqn)
+        ans, review, reason = _answer(card, model_name, model_fqn, index)
         dropped = _dropped_constructs(card)
         vid = f"Viz_{idx}"
         vizzes.append({"id": vid, "answer": ans, "viz_guid": _viz_guid()})
@@ -230,17 +292,22 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
         row_h = max(row_h, h)
         mapping_cards.append(_card_mapping_row(card, ans, review, reason, dropped))
 
+    skipped_pages = _report_skipped_pages(app, card_by_urn, mapping_cards)
+
     lb_tml = {"liveboard": {
         "name": report_name,
         "visualizations": vizzes,
         "layout": {"tiles": tiles},
     }}
     mapping = {
-        "pages": [{"name": report_name, "cards": len(vizzes)}],
+        "pages": ([{"name": report_name, "cards": len(vizzes)}] + skipped_pages),
         "cards": mapping_cards,
     }
     return {
         "liveboard": {"filename": f"{_slug(report_name)}.liveboard.tml", "tml": lb_tml},
         "mapping": mapping,
-        "counts": {"cards": len(vizzes)},
+        "counts": {"cards": len(vizzes),
+                   "cards_skipped": sum(1 for c in mapping_cards
+                                        if c["status"] == "Skipped"),
+                   "pages_skipped": len(skipped_pages)},
     }

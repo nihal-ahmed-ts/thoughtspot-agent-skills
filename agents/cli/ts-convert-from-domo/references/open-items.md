@@ -56,7 +56,8 @@ gap in the converter — hence KNOWN rather than DEFERRED.
 ## #4 — Live (`domo-cloud`) mode is not wired into `parse_app` — DEFERRED
 
 `client.py` is a working foundation (see #3 for what it reaches) but `parse_app` only reads
-a directory of JSON; the `--mode` flag records the mode and changes nothing. Because #3
+a directory of JSON, and `ts domo` now **refuses** any `--mode` other than `offline`
+rather than recording one it did not use. Because #3
 caps live mode at *partial* fidelity anyway, wiring it is deferred rather than blocking.
 `ts domo signin` exercises the client so the credential path stays honest and testable.
 
@@ -186,4 +187,102 @@ whose tables did not resolve were counted in `counts.joins` and listed in
 reconciled against the bundle's datasets; unmatched joins are dropped with a named
 warning, surfaced in the report's Manual review section and counted separately as
 `counts.joins_dropped`. `counts` now describes what was emitted, not what was seen.
+
+## #16 — Column renames never crossed the stage boundary — VERIFIED (fixed)
+
+The root cause behind two separate wrong-numbers bugs, and the reason they were worth
+fixing together rather than individually.
+
+`_build_tables_and_columns` disambiguates a colliding display name (`Revenue` on the
+second dataset becomes `Revenue (Refunds)`), but nothing rewrote:
+
+- **formula bodies** — a Beast Mode defined on Refunds translated to `sum([Revenue])`,
+  which the Model resolves to `Orders::Revenue`. Reported `Migrated`, note empty.
+- **Answer columns / `search_query`** — a card on Refunds grouped by `Region` emitted
+  `[Region]`, silently grouping by `Orders.Region`. For a *renamed Beast Mode* the
+  reference dangled instead.
+
+Both produce a **clean import with wrong numbers**, which is the failure mode this
+converter's discipline exists to prevent — worse than a failed import, because nothing
+tells the user.
+
+`build-model` and `build-liveboard` are separate CLI invocations that each re-parse the
+bundle, so `mapping.json` is structurally unreachable from the Answer path. The fix is
+therefore not to pass a rename map between them but to make the mapping a **pure
+function of the parsed IR**: `ts_cli/domo/naming.py` owns the collision rule for both
+columns and Beast Mode names, and every consumer resolves through it. Two independent
+invocations over the same bundle produce identical names because dataset order and the
+first-wins rule are deterministic. Nothing recomputes the rule.
+
+A reference that resolves to nothing the Model exposes is now flagged rather than
+shipped.
+
+**The regression test that matters** is `tests/test_domo_binding.py`: a property check
+that every `[Column]` in an emitted formula or `answer_column` resolves to a column the
+Model exposes **on the owning table**. Asserting "the rename happened" (the previous
+test) caught neither bug. Verified to bite: neutering either fix fails 5 of the 13.
+
+## #17 — A flagged formula made the whole model unimportable — VERIFIED (fixed)
+
+A NEEDS REVIEW formula is emitted verbatim, so it carried Domo backticks (and bare
+`CASE … END`) straight into `model.formulas[].expr`. That is not merely one unusable
+measure: the model TML fails to import, so the user loses every *other* measure too.
+Flagged expressions are now wrapped in a `/* TODO review: … */` marker — the convention
+`ts_cli/qlik/build_model.py` already uses — so the rest of the model imports and the
+original survives for the human.
+
+## #18 — Cards on Domo pages 2..n vanished — VERIFIED (fixed)
+
+Only the first page becomes a Liveboard (a scope decision the coverage matrix declares).
+The problem was silence: later pages produced no mapping row at all, so the report read
+`n_pages` from the mapping and asserted "the 1 Domo page(s) map to 1 Liveboard(s)". Each
+later page, and every card on it, is now reported `Skipped` with the page named, and
+`counts` carries `pages_skipped` / `cards_skipped`.
+
+## #19 — Parsed join cardinality was ignored in favour of a guess — VERIFIED (fixed)
+
+`magic_etl.parse_etl` reads `relationshipType`; nothing consumed it. All seven joins in
+the olist fixture declare `MTM` (many-to-many) and every one was emitted `MANY_TO_ONE` —
+the report then told the user to verify fan-out on a cardinality the converter invented.
+
+`relationshipType` is now honoured where ThoughtSpot can express it (`MTO`/`OTM`/`OTO`).
+A Domo **many-to-many cannot be expressed as a ThoughtSpot join at all**: it is warned
+about explicitly (measures will fan out until a bridge table exists) rather than
+flattened into MANY_TO_ONE. An unrecognised value falls back to the row-count heuristic
+and says so.
+
+## #20 — `Approximated` never reached the summary layer — VERIFIED (fixed)
+
+`_dropped_constructs` (#11) downgrades a card, but `_risk_level`, `_section_checklist`
+and `_section_scorecard` all keyed off the NEEDS-REVIEW tally alone. A conversion where
+every card lost its filters and sort still reported:
+
+    - **Risk score:** Low — clean conversion — no structural gaps.
+    | Liveboards | 90/100 | 1 page(s) → 1 Liveboard(s). |
+
+with no "rebuild each flagged card" line — the summary re-asserting exactly what the
+per-card flagging was added to stop. Risk, checklist and scorecard now all account for
+Approximated. The shipped fixture reports Medium / 66-100 instead of Low / 90-100.
+
+## #21 — Smaller correctness fixes from the same review — VERIFIED (fixed)
+
+- **`_UNSUPPORTED_RE` matched column names.** The structural check ran *before*
+  backtick→bracket conversion, so `SUM(\`Case Volume\`)` matched `\bcase\b` and was
+  flagged — and per #17 that broke the whole model import. "Case …" is ubiquitous in
+  CRM/support data. The check now runs after conversion, with bracketed identifiers and
+  string literals masked out.
+- **`_looks_like_key` used `endswith("id")`**, matching `Paid`, `Void`, `Valid`, `Rapid`,
+  `Overpaid` — two tables could join on a boolean flag with no warning, because a single
+  candidate was treated as the confident case. It now matches a trailing id-like *token*
+  (camelCase-aware, so `customerId` still matches), and a single candidate alongside
+  other shared columns reports which ones were not used.
+- **`DATEDIFF` was renamed without an arity check.** `DATEDIFF('month', a, b)` became
+  `diff_days('month', [End], [Start])` — a 3-arg call to a 2-arg function, graded
+  `Approximated`. Arity is now checked and the mismatch flagged. (The coverage matrix
+  also claimed the grain argument was "dropped"; it was kept. Corrected.)
+- **`counts["joins_dropped"]` conflated drops with advisory notes**, so a join that was
+  emitted but whose direction was uncertain reported `joins: 1, joins_dropped: 1`. Drops
+  and notes are now counted separately.
+- **`_APPROXIMATE_MARKERS` was dead**, with `_formula_status` re-inlining the same three
+  substrings. The constant now carries marker → caveat and is the single source.
 

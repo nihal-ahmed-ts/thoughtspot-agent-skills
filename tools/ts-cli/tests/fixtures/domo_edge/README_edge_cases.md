@@ -14,3 +14,8 @@ PR #440 review:
 | `domo_model_beastmodes.json` | string functions with no ThoughtSpot equivalent (`UPPER`, `TRIM`, `REPLACE`), a simple-form `CASE expr WHEN`, and a duplicate `Net Revenue` name across both datasets |
 | `domo_card_500001_table_min_price.json` | a card with a non-SUM (`MIN`) per-column aggregation |
 | `domo_liveboard_page_edge.json` | the page wiring for the card above |
+| `domo_card_500002_bar_refunds_by_region.json` | a card on the **second** dataset, whose `Region`/`Revenue` are display-renamed in the Model — emitting raw Domo names would silently bind it to `Orders` |
+| `domo_card_500003_table_second_page.json` + `domo_liveboard_page_edge2.json` | a **second page**, so cards on pages 2..n are exercised — they must be reported `Skipped`, not vanish |
+
+Page 1 deliberately carries **both** real cards (one per dataset) so the cross-dataset
+binding invariant in `tests/test_domo_binding.py` actually has something to check.

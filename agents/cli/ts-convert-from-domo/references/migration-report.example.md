@@ -9,7 +9,7 @@
 - **Migration complexity:** Low–Medium
 - **Automation %:** 56%  |  **Manual %:** 44%
 - **Estimated effort:** ~0.5–1 engineer-day
-- **Risk score:** Low–Medium — 1 item(s) flagged NEEDS REVIEW.
+- **Risk score:** Medium — 1 item(s) flagged NEEDS REVIEW; 3 item(s) Approximated — mapped with a caveat, each listed under Manual review.
 
 ## Inventory
 
@@ -88,6 +88,7 @@ Assembled onto Liveboard **Sales Overview** (3 tiles).
 
 - Pick one known total in Domo and confirm the identical number in ThoughtSpot (via Search / searchdata).
 - Slice a measure by a dimension across each join and confirm it does not fan out (validates the join cardinality).
+- Rebuild each flagged card and confirm it matches the source dashboard tile — including its sort, filters and number formats, which are not carried across.
 - Confirm any source filters became Liveboard filters and slice every tile.
 
 ## ThoughtSpot Modernization Scorecard
@@ -97,5 +98,5 @@ Assembled onto Liveboard **Sales Overview** (3 tiles).
 | Semantic Model | 80/100 | Confirm MANY_TO_ONE cardinalities to lock the grain. |
 | Search Readiness | 90/100 | Friendly names + reusable measures in place. |
 | Spotter Readiness | 85/100 | Stand up Spotter on the model to replace static breakdown charts. |
-| Liveboards | 90/100 | 1 page(s) → 1 Liveboard(s). |
+| Liveboards | 66/100 | 1 page(s) → 1 Liveboard(s); rebuild the flagged tile(s) to reach 100. |
 | AI Readiness | 80/100 | Add a Monitor/Alert on a key measure and enable Spotter. |

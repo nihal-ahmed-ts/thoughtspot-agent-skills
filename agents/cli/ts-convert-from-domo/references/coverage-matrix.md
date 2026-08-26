@@ -15,15 +15,14 @@ Constructs. Source of truth for the formula rows is
 | Construct | ThoughtSpot target | Status | Notes |
 |---|---|---|---|
 | Dataset (`schema.columns`) | Table TML | Migrated | type map: STRING/DATETIME/DOUBLE/LONG |
-| Dataset-to-dataset join (no ETL) | Model join | Approximated | **inferred by shared column name** — Domo carries no relationship metadata; confirm cardinality |
-| Magic ETL join graph (`--etl`) | Model joins | Approximated | `MergeJoin` keys + type → model joins (preferred over inference); side resolved star-to-fact, flagged NEEDS REVIEW |
+| Dataset-to-dataset join (no ETL) | Model join | NEEDS REVIEW | **inferred by shared column name** — Domo carries no relationship metadata. One join per dataset pair on an id-like key; a pair sharing only incidental columns is left unjoined and reported. Emitted `NEEDS REVIEW` in `mapping.json` — confirm cardinality |
+| Magic ETL join graph (`--etl`) | Model joins | NEEDS REVIEW | `MergeJoin` keys + type → model joins (preferred over inference). Table names are reconciled against the bundle's datasets; unmatched joins are dropped and reported. `relationshipType` is honoured where ThoughtSpot can express it — a Domo **many-to-many** cannot be, and is warned about loudly rather than emitted as MANY_TO_ONE |
 | Beast Mode (global) | Model formula | Migrated | deterministic subset only; window/LOD → NEEDS REVIEW |
 | Card-local `calculatedFields` | Model formula | Migrated | deduped against global Beast Modes by `(dataset, name)` |
 | Card `kpi` | Answer (KPI/headline) | Migrated | from `summaryNumber` |
 | Card `bar` | Answer (BAR) | Migrated | from `chartBody` |
 | Card `table` | Answer (TABLE) | Migrated | from `chartBody` |
 | Page | Liveboard | Migrated | one Liveboard per page |
-| Page `collectionIds` / `children` | Liveboard tabs | Approximated | single-tab path only; never exercised against a populated `collectionIds` payload |
 | Card layout (`preferredFullWidth`/`preferredFullHeight`) | Liveboard tile size | Approximated | grid approximation |
 
 ### Card query constructs
@@ -77,6 +76,8 @@ migration report.
 | Card `filters[]` — incl. `IN`, `NOT_IN`, `BETWEEN`, `LAST_N_DAYS`, `THIS_MONTH`, `YTD`, `dateRangeFilter` | No filter is emitted onto the Answer or Liveboard | Parsed into the IR, then dropped — reported per card. **The Answer will show unfiltered, all-time data** |
 | Card `quickFilters[]` | Not emitted as a Liveboard filter chip | Parsed into the IR, then dropped — reported per card |
 | Card `conditionalFormats[]` | Not emitted | Parsed into the IR, then dropped — reported per card |
+| Page `collectionIds` / `children` → Liveboard tabs | No `tabs` node is emitted — the Liveboard is a single page of tiles | `answers.py` emits `layout.tiles` only |
+| Domo pages 2..n | Only the first page becomes a Liveboard | Each later page and every card on it is reported `Skipped` with the page named |
 | Card `columns[].aggregation` other than `SUM` (`MIN`/`MAX`/`AVG`/`COUNT`) | No aggregation is emitted onto the Answer | The Answer falls back to the Model default (SUM for numerics), so a `MIN(Price)` card would read as `SUM(Price)`. Reported per card as `Approximated` |
 | Domo column `format` (CURRENCY / NUMBER / percent / precision) | No number format is emitted | Parsed into the IR, then dropped — reported per card |
 | Card drill paths and card-to-card links | No ThoughtSpot equivalent modelled yet | Deferred |

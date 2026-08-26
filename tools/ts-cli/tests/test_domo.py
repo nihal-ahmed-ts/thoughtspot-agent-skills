@@ -139,12 +139,20 @@ def test_dropped_constructs_reach_the_migration_report():
 
 
 def test_card_with_no_extra_constructs_stays_migrated():
-    """Guard the other direction — the downgrade must be construct-driven, not blanket."""
+    """Guard the other direction — the downgrade must be construct-driven, not blanket.
+
+    The app needs a dataset: a card whose columns belong to no dataset is genuinely
+    unbindable and is (correctly) flagged for that instead.
+    """
     from ts_cli.domo.answers import build_liveboard_artifacts
-    from ts_cli.domo.ir import Card, CardQuery, DomoApp, Page, QueryColumn
+    from ts_cli.domo.ir import (
+        Card, CardQuery, Dataset, DomoApp, DomoColumn, Page, QueryColumn,
+    )
 
     app = DomoApp(app_name="Clean", source="-", extraction_mode="offline")
-    app.cards = [Card(urn="1", title="Plain", chart_type="table",
+    app.datasets = [Dataset(id="d", name="T", rows=10, columns=[
+        DomoColumn("Region", "STRING"), DomoColumn("Revenue", "DOUBLE")])]
+    app.cards = [Card(urn="1", title="Plain", chart_type="table", data_set_id="d",
                       query=CardQuery(group_by=["Region"],
                                       columns=[QueryColumn(column="Revenue",
                                                            aggregation="SUM")]))]

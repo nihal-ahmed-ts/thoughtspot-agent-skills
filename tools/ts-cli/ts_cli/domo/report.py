@@ -64,10 +64,16 @@ def _complexity_effort(n_tables: int, n_joins: int) -> tuple[str, str]:
     return "Medium–High", "~1–2 engineer-days"
 
 
-def _risk_level(needs: int, chasm: list, n_joins: int) -> str:
-    if needs == 0 and not chasm:
+def _risk_level(needs: int, approx: int, chasm: list, n_joins: int) -> str:
+    """Risk must account for Approximated, not only NEEDS REVIEW.
+
+    Keying only off `needs` meant a conversion where every card lost its filters and
+    sort still reported "Low — clean conversion — no structural gaps", i.e. the summary
+    layer re-asserting exactly what the per-card flagging was added to prevent.
+    """
+    if needs == 0 and approx == 0 and not chasm:
         return "Low"
-    if chasm or n_joins >= 5:
+    if chasm or n_joins >= 5 or needs:
         return "Medium"
     return "Low–Medium"
 
@@ -95,9 +101,13 @@ class _Stats:
     n_pages: int
     bm_m: int
     bm_r: int
+    bm_a: int
     jn_r: int
     cd_r: int
+    cd_a: int
+    ds_a: int
     needs: int
+    approx: int
     automation: int
     complexity: str
     effort: str
@@ -119,6 +129,7 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
     jn_m, jn_a, jn_r, _jn_s = _tally(joins)
     cd_m, cd_a, cd_r, _cd_s = _tally(cards)
     ds_m, ds_a, ds_r, _ds_s = _tally(datasets)
+    approx = ds_a + jn_a + bm_a + cd_a
 
     n_tables, n_joins, n_beast, n_cards = len(datasets), len(joins), len(beast), len(cards)
     total = n_tables + n_joins + n_beast + n_cards
@@ -137,11 +148,11 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
         n_cols=sum(d.get("columns", 0) for d in datasets),
         n_joins=n_joins, n_beast=n_beast, n_cards=n_cards,
         n_pages=len((lb_mapping or {}).get("pages", [])),
-        bm_m=bm_m, bm_r=bm_r, jn_r=jn_r, cd_r=cd_r,
-        needs=needs,
+        bm_m=bm_m, bm_r=bm_r, bm_a=bm_a, jn_r=jn_r, cd_r=cd_r, cd_a=cd_a, ds_a=ds_a,
+        needs=needs, approx=approx,
         automation=_pct(ds_m + jn_m + bm_m + cd_m, total),
         complexity=complexity, effort=effort,
-        risk=_risk_level(needs, chasm, n_joins),
+        risk=_risk_level(needs, approx, chasm, n_joins),
         chasm=chasm,
         from_etl=any(j.get("source") == "magic_etl" for j in joins),
         join_warnings=mapping.get("join_warnings", []),
@@ -183,6 +194,9 @@ def _section_exec_summary(st: _Stats) -> list[str]:
     risk_bits = []
     if st.needs:
         risk_bits.append(f"{st.needs} item(s) flagged NEEDS REVIEW")
+    if st.approx:
+        risk_bits.append(f"{st.approx} item(s) Approximated — mapped with a caveat, "
+                         "each listed under Manual review")
     if st.chasm:
         risk_bits.append(
             "multiple facts share the join key(s) "
@@ -355,17 +369,23 @@ def _section_checklist(st: _Stats) -> list[str]:
                  "fan out (validates the join cardinality).")
     if st.bm_r:
         L.append("- Confirm every NEEDS REVIEW Beast Mode resolves correctly after its rewrite.")
-    if st.cd_r:
-        L.append("- Rebuild each flagged card and confirm it matches the source dashboard tile.")
+    if st.bm_a:
+        L.append("- Check each Approximated formula against the source Beast Mode "
+                 "(grain, argument order, sample-vs-population).")
+    if st.cd_r or st.cd_a:
+        L.append("- Rebuild each flagged card and confirm it matches the source dashboard "
+                 "tile — including its sort, filters and number formats, which are not "
+                 "carried across.")
     L += ["- Confirm any source filters became Liveboard filters and slice every tile.", ""]
     return L
 
 
 def _section_scorecard(st: _Stats) -> list[str]:
-    sem = max(60, 90 - (10 if st.jn_r else 0) - (10 if st.chasm else 0))
-    search = max(60, 90 - 5 * st.bm_r)
+    sem = max(60, 90 - (10 if st.jn_r else 0) - (10 if st.chasm else 0)
+              - (5 if st.ds_a else 0))
+    search = max(60, 90 - 5 * st.bm_r - 3 * st.bm_a)
     spotter = 85 if st.n_beast else 75
-    lb = max(60, 90 - 5 * st.cd_r)
+    lb = max(50, 90 - 5 * st.cd_r - 8 * st.cd_a)
     ai = 80 if st.n_beast else 70
     n_pages = st.n_pages or 1
     return [
@@ -385,7 +405,8 @@ def _section_scorecard(st: _Stats) -> list[str]:
         "Stand up Spotter on the model to replace static breakdown charts. |",
         f"| Liveboards | {lb}/100 | "
         + (f"{n_pages} page(s) → {n_pages} Liveboard(s)"
-           + ("; rebuild the flagged tile(s) to reach 100." if st.cd_r else ".")) + " |",
+           + ("; rebuild the flagged tile(s) to reach 100."
+              if (st.cd_r or st.cd_a) else ".")) + " |",
         f"| AI Readiness | {ai}/100 | "
         "Add a Monitor/Alert on a key measure and enable Spotter. |",
         "",

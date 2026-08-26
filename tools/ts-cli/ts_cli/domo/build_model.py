@@ -5,6 +5,7 @@ Delegates model assembly to ts_cli.model_builder.build_model_tml (shared emitter
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from ts_cli.databricks.mv_tml import validate_tml_invariants
@@ -13,6 +14,7 @@ from ts_cli.model_builder import build_model_tml
 
 from .functions import translate
 from .ir import Dataset, DomoApp
+from .naming import ColumnIndex, build_column_index
 
 # Domo dataset type -> ThoughtSpot data_type
 _TYPE_MAP = {
@@ -67,10 +69,22 @@ _INCIDENTAL_KEYS = {
 }
 
 
+# An id-like column name: a trailing `id`/`key`/`code`/`urn` TOKEN, not a trailing
+# substring — `endswith("id")` also matched Paid, Void, Valid, Rapid and Overpaid, so
+# two tables could end up joined on a boolean flag.
+_KEY_TOKENS = {"id", "ids", "key", "keys", "code", "codes", "urn", "guid", "uuid", "pk", "fk"}
+_KEY_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+
+
 def _looks_like_key(name: str) -> bool:
-    low = name.strip().lower()
-    return low.endswith("id") or low.endswith("_key") or low.endswith(" key") \
-        or low.endswith("code") or low.endswith("urn")
+    """True when the LAST word of the name is an id-like token.
+
+    Splits camelCase humps before lowercasing, so `customerId` tokenizes to
+    ["customer", "id"] and matches, while `Paid`/`Void`/`Valid`/`Rapid` do not.
+    """
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name.strip())
+    tokens = [t for t in _KEY_TOKEN_RE.split(spaced.lower()) if t]
+    return bool(tokens) and tokens[-1] in _KEY_TOKENS
 
 
 def _pick_join_key(shared: set[str]) -> tuple[str | None, str]:
@@ -78,6 +92,10 @@ def _pick_join_key(shared: set[str]) -> tuple[str | None, str]:
     ranked = sorted(shared)
     keyish = [c for c in ranked if _looks_like_key(c)]
     if len(keyish) == 1:
+        others = [c for c in ranked if c != keyish[0]]
+        if others:
+            return keyish[0], (f"joined on '{keyish[0]}'; {len(others)} other shared "
+                               f"column(s) ({', '.join(others)}) were not used")
         return keyish[0], ""
     if len(keyish) > 1:
         return keyish[0], (f"{len(keyish)} id-like columns shared "
@@ -145,20 +163,17 @@ def _orient_joins(joins: list[dict], rows_by_table: dict[str, int]) -> list[str]
 
 
 def _build_tables_and_columns(app: DomoApp, connection_name: str, db: str, schema: str,
-                             type_overrides: Optional[dict]) -> tuple[dict, list, list, list]:
+                             type_overrides: Optional[dict],
+                             index: ColumnIndex) -> tuple[dict, list, list, list]:
     """Return (table_docs, tables, model_columns, renamed_cols).
 
-    A model cannot expose two columns with the same DISPLAY name, but a name shared
-    across joined tables (typically the join key, e.g. Customer ID) must stay
-    physically present on BOTH tables so the join resolves. So on a display collision
-    we keep the column and disambiguate its display name (appending the table),
-    leaving db_column_name = the physical name the join references.
+    Display names come from the shared `ColumnIndex`. The collision rule itself lives
+    in ts_cli/domo/naming.py so that the formula bodies and the Answer columns resolve
+    through exactly the same mapping — see that module for why.
     """
     table_docs: dict[str, dict] = {}
     tables: list[dict] = []
     columns: list[dict] = []
-    renamed_cols: list[dict] = []
-    used_display: set = set()
 
     for ds in app.datasets:
         table_docs[f"{_slug(ds.name)}.table.tml"] = _build_table_doc(
@@ -166,16 +181,12 @@ def _build_tables_and_columns(app: DomoApp, connection_name: str, db: str, schem
         tables.append({"name": ds.name, "db_table": ds.name})
         for c in ds.columns:
             ts_type = _ts_type(c.domo_type, type_overrides, c.name)
-            display = c.name
-            if display.lower() in used_display:
-                display = f"{c.name} ({ds.name})"
-                renamed_cols.append({"table": ds.name, "from": c.name, "to": display})
-            used_display.add(display.lower())
             columns.append({
-                "name": display, "db_column_name": c.name, "table": ds.name,
+                "name": index.display(ds.id, c.name) or c.name,
+                "db_column_name": c.name, "table": ds.name,
                 "column_type": _col_type(ts_type),
             })
-    return table_docs, tables, columns, renamed_cols
+    return table_docs, tables, columns, list(index.renames)
 
 
 def _resolve_joins(app: DomoApp,
@@ -208,9 +219,15 @@ def _resolve_joins(app: DomoApp,
     return joins, notes, "shared_column_name", warnings
 
 
-# Translations that are mapped but need a human to confirm semantics. `build_model_tml`
-# derives each formula's id from its NAME, so a duplicate name means a duplicate id.
-_APPROXIMATE_MARKERS = ("diff_days(", "stddev(", "variance(")
+# Translations that are mapped but need a human to confirm semantics: marker -> the
+# caveat to report. `build_model_tml` derives each formula's id from its NAME, so a
+# duplicate name means a duplicate id (see _translate_beast_modes).
+_APPROXIMATE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("diff_days(", "DATEDIFF → diff_days assumes DAY grain and ThoughtSpot argument "
+                   "order (a−b) — verify the sign and the unit"),
+    ("stddev(", "verify sample vs population"),
+    ("variance(", "verify sample vs population"),
+)
 
 
 def _formula_status(ts_expr: str, review: bool) -> tuple[str, str]:
@@ -218,65 +235,116 @@ def _formula_status(ts_expr: str, review: bool) -> tuple[str, str]:
     if review:
         return "NEEDS REVIEW", ""
     low = ts_expr.lower()
-    if "diff_days(" in low:
-        return "Approximated", ("DATEDIFF → diff_days assumes DAY grain and TS argument "
-                               "order (a−b) — verify the sign and the unit")
-    if "stddev(" in low or "variance(" in low:
-        return "Approximated", "verify sample vs population"
+    for marker, caveat in _APPROXIMATE_MARKERS:
+        if marker in low:
+            return "Approximated", caveat
     return "Migrated", ""
 
 
-def _translate_beast_modes(app: DomoApp) -> tuple[list, list]:
-    """Translate global + card-local Beast Modes, deduped by (data_source_id, name).
-
-    Names must be unique across datasets: `build_model_tml` derives each formula id
-    from the name, so two datasets each carrying (say) a "Net Revenue" Beast Mode —
-    ordinary in Domo — produced two formulas with the same id. Downstream dedup then
-    stripped BOTH, leaving the model columns pointing at a `formula_id` that no longer
-    existed (a dangling reference; import fails) while the mapping still called them
-    Migrated. Collisions are therefore disambiguated by dataset.
-    """
+def _dedupe_beast_modes(app: DomoApp) -> list:
+    """Global Beast Modes then card-local calculated fields, deduped by (dataset, name)."""
     all_bm = list(app.beast_modes)
     for card in app.cards:
         all_bm.extend(card.calc_fields)
-
-    ds_name = {d.id: d.name for d in app.datasets}
-    counts: dict[str, int] = {}
-    for bm in all_bm:
-        if bm.name:
-            counts[bm.name] = counts.get(bm.name, 0) + 1
-
     seen: set = set()
-    used_names: set = set()
+    out = []
+    for bm in all_bm:
+        key = (bm.data_source_id or "", bm.name)
+        if not bm.name or key in seen:
+            continue
+        seen.add(key)
+        out.append(bm)
+    return out
+
+
+def _translate_one(bm, index: ColumnIndex) -> tuple[str, str, list[str]]:
+    """Translate one Beast Mode. Returns (ts_expr, status, notes)."""
+    ts_expr, review, reason = translate(bm.formula)
+
+    # Bind the formula to the Model's names for ITS dataset. Without this a Beast Mode
+    # defined on the second dataset reads the FIRST dataset's column of the same name —
+    # a clean import with wrong numbers.
+    ts_expr, unresolved = index.rewrite(ts_expr, bm.data_source_id)
+    if unresolved:
+        review = True
+        reason = "; ".join(x for x in [
+            reason,
+            "references column(s) the Model does not expose: "
+            + ", ".join(sorted(set(unresolved)))] if x)
+
+    status, extra = _formula_status(ts_expr, review)
+
+    # A flagged formula is emitted VERBATIM — by definition not valid ThoughtSpot
+    # syntax. Left bare it makes the whole model TML unimportable, so the user loses
+    # every other measure too. Wrap it in a comment marker, as ts_cli/qlik does: the
+    # rest of the model imports and the original survives for the human.
+    if review:
+        ts_expr = f"/* TODO review: {ts_expr} */"
+
+    return ts_expr, status, [x for x in (reason, extra) if x]
+
+
+def _translate_beast_modes(app: DomoApp, index: ColumnIndex) -> tuple[list, list]:
+    """Translate every Beast Mode into a Model formula + a mapping-report row.
+
+    Names come from the shared ColumnIndex (see ts_cli/domo/naming.py): a Beast Mode
+    name used by two datasets must be disambiguated because `build_model_tml` derives
+    the formula id from the name, and a card referencing the renamed one has to resolve
+    to the same string. Both facts live in one place so the stages cannot disagree.
+    """
+    ds_name = {d.id: d.name for d in app.datasets}
     translated: list[dict] = []
     mapping_formulas: list[dict] = []
-    for bm in all_bm:
-        if not bm.name or (bm.data_source_id, bm.name) in seen:
-            continue
-        seen.add((bm.data_source_id, bm.name))
 
-        name = bm.name
-        if counts.get(bm.name, 0) > 1 and name in used_names:
-            suffix = ds_name.get(bm.data_source_id) or str(bm.data_source_id)
-            name = f"{bm.name} ({suffix})"
-        n, i = name, 2
-        while n in used_names:            # last-resort guard: still not unique
-            n, i = f"{name} {i}", i + 1
-        name = n
-        used_names.add(name)
-
-        ts_expr, review, reason = translate(bm.formula)
-        status, extra = _formula_status(ts_expr, review)
-        notes = [x for x in (reason, extra) if x]
+    for bm in _dedupe_beast_modes(app):
+        name = index.formula(bm.data_source_id, bm.name) or bm.name
+        ts_expr, status, notes = _translate_one(bm, index)
         if name != bm.name:
             notes.append(f"renamed from '{bm.name}' — the same Beast Mode name exists on "
                          "another dataset and formula ids must be unique")
         translated.append({"name": name, "expr": ts_expr, "column_type": "MEASURE"})
         mapping_formulas.append({
             "name": name, "domo_name": bm.name, "domo_formula": bm.formula,
+            # The owning dataset — needed to verify the formula binds to the right
+            # table, which is not derivable from the name once names collide.
+            "dataset": ds_name.get(bm.data_source_id) or "",
+            "dataset_id": bm.data_source_id or "",
             "ts_formula": ts_expr, "status": status, "note": "; ".join(notes),
         })
     return translated, mapping_formulas
+
+
+# Domo `relationshipType` -> what we can honestly assert about cardinality.
+# ThoughtSpot has no many-to-many join, so MTM cannot be expressed at all: emitting
+# MANY_TO_ONE over it silently changes the grain. Only the directional forms are
+# trusted; anything else falls back to the row-count heuristic and says so.
+_DOMO_CARDINALITY = {
+    "MTO": "MANY_TO_ONE",
+    "MANY_TO_ONE": "MANY_TO_ONE",
+    "OTM": "ONE_TO_MANY",
+    "ONE_TO_MANY": "ONE_TO_MANY",
+    "OTO": "ONE_TO_ONE",
+    "ONE_TO_ONE": "ONE_TO_ONE",
+}
+_DOMO_UNSUPPORTED_CARDINALITY = {"MTM", "MANY_TO_MANY"}
+
+
+def _declared_cardinality(join: dict) -> tuple[Optional[str], Optional[str]]:
+    """Return (cardinality, warning) from the join's Domo `relationshipType`."""
+    declared = str(join.get("domo_relationship") or "").strip().upper()
+    if not declared:
+        return None, None
+    if declared in _DOMO_UNSUPPORTED_CARDINALITY:
+        return None, (
+            f"{join.get('left_table')} ↔ {join.get('right_table')}: Domo declares this "
+            "relationship MANY-TO-MANY, which ThoughtSpot cannot express as a join. "
+            "The emitted cardinality is a row-count guess — a many-to-many needs a "
+            "bridge table, and measures WILL fan out until it has one")
+    mapped = _DOMO_CARDINALITY.get(declared)
+    if mapped:
+        return mapped, None
+    return None, (f"{join.get('left_table')} ↔ {join.get('right_table')}: unrecognized "
+                  f"Domo relationshipType {declared!r} — cardinality inferred instead")
 
 
 def _apply_join_fixes(model_tml: dict, joins: list, app: DomoApp) -> None:
@@ -290,18 +358,23 @@ def _apply_join_fixes(model_tml: dict, joins: list, app: DomoApp) -> None:
     the first dataset for inferred joins); cardinality is refined by row count when
     known, else MANY_TO_ONE.
     """
-    directed = {(j["left_table"], j["right_table"]) for j in joins}
+    directed = {(j["left_table"], j["right_table"]): j for j in joins}
     rows_by_table = {ds.name: (ds.rows or 0) for ds in app.datasets}
     for mt in model_tml.get("model", {}).get("model_tables", []):
         name = mt.get("name")
         kept = []
         for j in mt.get("joins", []):
             other = j.get("with")
-            if (name, other) not in directed:  # keep only on the source side
+            source = directed.get((name, other))
+            if source is None:  # keep only on the source side
                 continue
-            here, there = rows_by_table.get(name, 0), rows_by_table.get(other, 0)
-            j["cardinality"] = ("ONE_TO_MANY" if (here and there and here < there)
-                                else "MANY_TO_ONE")
+            declared, _warning = _declared_cardinality(source)
+            if declared:
+                j["cardinality"] = declared
+            else:
+                here, there = rows_by_table.get(name, 0), rows_by_table.get(other, 0)
+                j["cardinality"] = ("ONE_TO_MANY" if (here and there and here < there)
+                                    else "MANY_TO_ONE")
             kept.append(j)
         if kept:
             mt["joins"] = kept
@@ -345,13 +418,21 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
     """
     model_name = model_name or f"{app.app_name} Model"
 
+    index = build_column_index(app)
     table_docs, tables, columns, renamed_cols = _build_tables_and_columns(
-        app, connection_name, db, schema, type_overrides)
+        app, connection_name, db, schema, type_overrides, index)
     joins, join_notes, join_source, join_warnings = _resolve_joins(app, explicit_joins)
-    translated, mapping_formulas = _translate_beast_modes(app)
+    translated, mapping_formulas = _translate_beast_modes(app, index)
 
     rows_by_table = {ds.name: (ds.rows or 0) for ds in app.datasets}
+    # `join_warnings` so far are genuine DROPS; orientation/cardinality notes are
+    # advisory and must not be counted as dropped joins.
+    joins_dropped = len(join_warnings)
     join_warnings += _orient_joins(joins, rows_by_table)
+    for j in joins:
+        _c, warning = _declared_cardinality(j)
+        if warning:
+            join_warnings.append(warning)
     # Re-derive the notes AFTER orientation so the report names the same sides the TML does.
     join_notes = [(j["left_table"], j["right_table"],
                    ", ".join(k["left"] for k in j.get("keys", [])))
@@ -374,7 +455,8 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
         "model": {"filename": f"{_slug(model_name)}.model.tml", "tml": model_tml},
         "mapping": mapping,
         # counts describe what was EMITTED, not what was seen — the join count used to
-        # report parsed-but-dropped ETL joins.
+        # report parsed-but-dropped ETL joins. `joins_dropped` counts DROPS only; the
+        # advisory orientation/cardinality notes live in mapping["join_warnings"].
         "counts": {"tables": len(tables), "formulas": len(translated),
-                   "joins": len(joins), "joins_dropped": len(join_warnings)},
+                   "joins": len(joins), "joins_dropped": joins_dropped},
     }
