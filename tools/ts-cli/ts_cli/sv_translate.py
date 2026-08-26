@@ -841,7 +841,11 @@ def _derived_resolver(
                 # Inline the metric's own aggregate over the physical column,
                 # which is the form every working formula in a converted Model
                 # uses: `sum ( [DM_ORDER_DETAIL::LINE_TOTAL] )`.
-                return translate_sql_expr(m["expr"], generic)
+                # Against the INNER metric's own table: under `generic`
+                # (alias "") a bare column silently skips the metric (17.1).
+                inner = make_resolver(parsed, m.get("alias_table") or "",
+                    annotations=annotations, promote_synonym=promote_synonym)
+                return translate_sql_expr(m["expr"], inner)
             return "[" + construct_formula_id(
                 m, promote_synonym=promote_synonym) + "]"
         return generic(ident)
