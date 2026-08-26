@@ -1,4 +1,7 @@
-"""DomoApp IR -> Answers embedded in one tabbed Liveboard TML.
+"""DomoApp IR -> Answers embedded in one Liveboard TML.
+
+The Liveboard is a single page of tiles — Domo `collectionIds` / page `children` are
+NOT translated into Liveboard tabs (see the skill's coverage matrix).
 
 Resolves page.card_ids -> cards (page order), one Answer per card. No shared answer
 emitter exists in this codebase, so the Answer/Liveboard TML is hand-built here
@@ -96,32 +99,75 @@ def _answer(card: Card, model_name: str, model_fqn: Optional[str]) -> tuple[dict
     return answer, review, reason
 
 
+def _describe_sort(card: Card) -> Optional[str]:
+    if not card.query.order_by:
+        return None
+    return "sort (%s)" % ", ".join(
+        f"{o.column} {o.order}".strip() for o in card.query.order_by)
+
+
+def _describe_filters(card: Card) -> Optional[str]:
+    if not card.query.filters:
+        return None
+    return "card filter(s) (%s)" % ", ".join(
+        f"{f.column} {f.operand}".strip() for f in card.query.filters)
+
+
+def _describe_quick_filters(card: Card) -> Optional[str]:
+    if not card.quick_filters:
+        return None
+    return "quick filter(s) (%s)" % ", ".join(
+        str(f.get("column") or f.get("name") or "?") for f in card.quick_filters)
+
+
+def _describe_conditional_formats(card: Card) -> Optional[str]:
+    if not card.conditional_formats:
+        return None
+    return f"conditional formatting ({len(card.conditional_formats)} rule(s))"
+
+
+def _describe_number_formats(card: Card) -> Optional[str]:
+    formatted = [c.column for c in card.query.columns if c.fmt]
+    if not formatted:
+        return None
+    return "number format on %s" % ", ".join(formatted)
+
+
+def _describe_aggregation_overrides(card: Card) -> Optional[str]:
+    """A card can override the aggregation per column (MIN/MAX/AVG/COUNT).
+
+    The Answer carries no aggregation, so the Model default (SUM for numerics)
+    applies — a `MIN(Price)` card would otherwise silently render as `SUM(Price)`.
+    """
+    overrides = [f"{c.column}={c.aggregation.upper()}" for c in card.query.columns
+                 if c.aggregation and c.aggregation.upper() not in ("SUM", "")]
+    if not overrides:
+        return None
+    return ("non-SUM aggregation (%s) — the Answer falls back to the Model default"
+            % ", ".join(overrides))
+
+
+# Each describer returns a human-readable string, or None when the card does not
+# carry that construct. Adding a newly-dropped construct means adding one describer.
+_DROPPED_DESCRIBERS = (
+    _describe_sort,
+    _describe_filters,
+    _describe_quick_filters,
+    _describe_conditional_formats,
+    _describe_number_formats,
+    _describe_aggregation_overrides,
+)
+
+
 def _dropped_constructs(card: Card) -> list[str]:
     """Constructs present on the Domo card that the emitted Answer does NOT carry.
 
     These are parsed into the IR but not translated (see references/open-items.md #11).
     Reporting them per card is the point: without this, a card whose sort, date filter
     and quick filters were all left behind still counted as fully "Migrated", which is
-    exactly the silent-downgrade this converter is supposed to refuse to do.
+    exactly the silent downgrade this converter is supposed to refuse to do.
     """
-    dropped: list[str] = []
-    q = card.query
-    if q.order_by:
-        dropped.append("sort (%s)" % ", ".join(
-            f"{o.column} {o.order}".strip() for o in q.order_by))
-    if q.filters:
-        dropped.append("card filter(s) (%s)" % ", ".join(
-            f"{f.column} {f.operand}".strip() for f in q.filters))
-    if card.quick_filters:
-        dropped.append("quick filter(s) (%s)" % ", ".join(
-            str(f.get("column") or f.get("name") or "?") for f in card.quick_filters))
-    if card.conditional_formats:
-        dropped.append(
-            f"conditional formatting ({len(card.conditional_formats)} rule(s))")
-    formatted = [c.column for c in q.columns if c.fmt]
-    if formatted:
-        dropped.append("number format on %s" % ", ".join(formatted))
-    return dropped
+    return [d for d in (describe(card) for describe in _DROPPED_DESCRIBERS) if d]
 
 
 def _viz_guid() -> str:
@@ -157,6 +203,7 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
     tiles: list[dict] = []
     mapping_cards: list[dict] = []
     x = y = 0
+    row_h = 0
     idx = 0
     for urn in order:
         card = card_by_urn.get(str(urn))
@@ -172,10 +219,15 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
         w = max(card.pref_width or 6, 3)
         h = max(card.pref_height or 4, 2)
         if x + w > 12:
+            # Advance by the TALLEST tile in the row being closed, not by the height of
+            # the tile that happens to wrap — otherwise a short tile wrapping under a
+            # tall one lands inside it and the tiles overlap.
             x = 0
-            y += h
+            y += row_h
+            row_h = 0
         tiles.append({"visualization_id": vid, "x": x, "y": y, "width": w, "height": h})
         x += w
+        row_h = max(row_h, h)
         mapping_cards.append(_card_mapping_row(card, ans, review, reason, dropped))
 
     lb_tml = {"liveboard": {

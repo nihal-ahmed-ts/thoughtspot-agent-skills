@@ -9,6 +9,28 @@ from __future__ import annotations
 
 import re
 
+from ts_cli.formula_common import wrap_passthrough_calls
+
+# --- BL-171 pass-throughs -------------------------------------------------
+# Functions with NO ThoughtSpot equivalent. FUNCTION_MAP points the Domo name at
+# a marker; `wrap_passthrough_calls` turns the marker into a `sql_string_op`
+# pass-through that the warehouse evaluates. Same mechanism as ts_cli/qlik.
+_PT_UPPER = "__pt_upper"
+_PT_LOWER = "__pt_lower"
+_PT_TRIM = "__pt_trim"
+_PT_LTRIM = "__pt_ltrim"
+_PT_RTRIM = "__pt_rtrim"
+_PT_REPLACE = "__pt_replace"
+
+PASSTHROUGH_MAP: dict[str, tuple[str, str, int]] = {
+    _PT_UPPER: ("sql_string_op", "UPPER({0})", 1),
+    _PT_LOWER: ("sql_string_op", "LOWER({0})", 1),
+    _PT_TRIM: ("sql_string_op", "TRIM({0})", 1),
+    _PT_LTRIM: ("sql_string_op", "LTRIM({0})", 1),
+    _PT_RTRIM: ("sql_string_op", "RTRIM({0})", 1),
+    _PT_REPLACE: ("sql_string_op", "REPLACE({0}, {1}, {2})", 3),
+}
+
 # Domo Beast Mode function/aggregation name -> ThoughtSpot function.
 # None = no ThoughtSpot equivalent -> flag NEEDS REVIEW.
 FUNCTION_MAP: dict[str, str | None] = {
@@ -22,9 +44,19 @@ FUNCTION_MAP: dict[str, str | None] = {
     "power": "pow", "pow": "pow", "sqrt": "sqrt", "exp": "exp", "ln": "ln", "log": "log",
     "mod": "mod", "sign": "sign",
     # --- string ---
-    "concat": "concat", "upper": "upper", "lower": "lower", "trim": "trim",
-    "ltrim": "ltrim", "rtrim": "rtrim", "length": "strlen", "len": "strlen",
-    "substring": "substring", "substr": "substring", "replace": "replace",
+    # NOTE: `upper`/`lower`/`trim`/`ltrim`/`rtrim`/`replace` map onto PASSTHROUGH
+    # MARKERS, not ThoughtSpot names — those six functions do not exist in
+    # ThoughtSpot (BL-170/BL-171, live-disproved on se-thoughtspot 2026-06-13 and
+    # 2026-07-29/30; a bare call is rejected at import with error_code 14516).
+    # `_remap_functions` rewrites each marker into a `sql_string_op` pass-through,
+    # so a marker never reaches an emitted formula (asserted by
+    # tests/test_domo_functions.py::TestMapIntegrity).
+    "concat": "concat",
+    "upper": _PT_UPPER, "lower": _PT_LOWER, "trim": _PT_TRIM,
+    "ltrim": _PT_LTRIM, "rtrim": _PT_RTRIM, "replace": _PT_REPLACE,
+    "length": "strlen", "len": "strlen",
+    # ThoughtSpot's substring function is `substr` — `substring` does not exist.
+    "substring": "substr", "substr": "substr",
     "left": "left", "right": "right", "instr": "strpos",
     # --- date ---
     "year": "year", "month": "month", "day": "day", "hour": "hour", "minute": "minute",
@@ -41,14 +73,21 @@ FUNCTION_MAP: dict[str, str | None] = {
 
 # ThoughtSpot function names we emit ourselves — must not be flagged as "unknown"
 # when the token pass re-scans the translated string.
-_KNOWN_TS = {v for v in FUNCTION_MAP.values() if v} | {
-    "unique_count", "unique", "if", "isnull", "to_string", "to_double",
+_KNOWN_TS = ({v for v in FUNCTION_MAP.values() if v} - set(PASSTHROUGH_MAP)) | {
+    # `unique count` (a space) is emitted by step 2; `unique_count` is NOT a
+    # ThoughtSpot function and must stay flagged if a Beast Mode spells it that way.
+    "unique", "if", "isnull", "to_string", "to_double",
     "diff_hours", "diff_minutes", "add_days", "add_months",
+    "sql_string_op", "sql_date_op", "sql_number_op",
 }
 
 # Constructs the token-based translator cannot faithfully rewrite -> flag NEEDS REVIEW.
 _UNSUPPORTED_RE = re.compile(
-    r"\bcase\s+when\b|\bover\s*\(|\bpartition\s+by\b", re.IGNORECASE)
+    r"\bcase\b|\bover\s*\(|\bpartition\s+by\b", re.IGNORECASE)
+
+_MARKER_ORIGIN = {marker: name.upper()
+                  for name, marker in FUNCTION_MAP.items()
+                  if marker in PASSTHROUGH_MAP}
 
 _BACKTICK = re.compile(r"`([^`]+)`")
 # COUNT(DISTINCT [col]) -> unique_count([col])  (runs after backtick->bracket)
@@ -68,7 +107,8 @@ def translate(expr: str) -> tuple[str, bool, str]:
     # 0. structural constructs the token translator can't faithfully rewrite
     #    (multi-branch CASE, window/OVER) -> emit verbatim, flag for manual rewrite.
     if _UNSUPPORTED_RE.search(expr):
-        return expr, True, "contains CASE WHEN / window construct — manual rewrite required"
+        return expr, True, ("contains CASE / window construct — ThoughtSpot has no CASE "
+                            "syntax; manual rewrite required")
 
     # 1. column refs: `Col Name` -> [Col Name]
     out = _BACKTICK.sub(lambda m: f"[{m.group(1)}]", expr)
@@ -99,5 +139,17 @@ def translate(expr: str) -> tuple[str, bool, str]:
         return m.group(0)
 
     out = _FUNC_TOKEN.sub(_repl, out)
+
+    # 4. BL-171: markers -> sql_string_op pass-throughs. An unresolved marker
+    #    (wrong arity, unbalanced parens) is flagged rather than emitted — a bare
+    #    upper/trim/replace call is rejected at import with error_code 14516.
+    out, unresolved = wrap_passthrough_calls(out, PASSTHROUGH_MAP)
+    if unresolved:
+        review = True
+        for marker in sorted(unresolved):
+            reasons.append(
+                f"'{_MARKER_ORIGIN.get(marker, marker)}' has no ThoughtSpot "
+                "equivalent and could not be rewritten as a SQL pass-through")
+
     reason = "; ".join(dict.fromkeys(reasons)) if review else ""
     return out, review, reason

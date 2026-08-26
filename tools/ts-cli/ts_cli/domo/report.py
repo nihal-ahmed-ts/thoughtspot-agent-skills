@@ -34,7 +34,13 @@ def _tally(items: list) -> tuple[int, int, int, int]:
 
 
 def _pct(n: int, d: int) -> int:
-    return round(100 * n / d) if d else 100
+    """Percentage, or 0 when there is nothing to measure.
+
+    Returning 100 on a zero denominator made an empty/unreadable bundle render as
+    "Automation 100% — clean conversion", i.e. the most reassuring possible report for
+    the case where nothing was converted at all.
+    """
+    return round(100 * n / d) if d else 0
 
 
 def _chasm_keys(joins: list) -> list[str]:
@@ -98,6 +104,8 @@ class _Stats:
     risk: str
     chasm: list = field(default_factory=list)
     from_etl: bool = False
+    join_warnings: list = field(default_factory=list)
+    nothing_parsed: bool = False
 
 
 def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
@@ -136,6 +144,8 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
         risk=_risk_level(needs, chasm, n_joins),
         chasm=chasm,
         from_etl=any(j.get("source") == "magic_etl" for j in joins),
+        join_warnings=mapping.get("join_warnings", []),
+        nothing_parsed=not (datasets or joins or beast or cards),
     )
 
 
@@ -160,6 +170,16 @@ def _section_header(st: _Stats) -> list[str]:
 
 
 def _section_exec_summary(st: _Stats) -> list[str]:
+    if st.nothing_parsed:
+        return [
+            "## Executive summary",
+            "",
+            "⚠️ **Nothing was parsed from this source.** No datasets, joins, Beast Modes or "
+            "cards were found, so there is nothing to migrate and no automation to report. "
+            "Check that the bundle directory contains the expected Domo JSON files "
+            "(see the skill's Prerequisites) and re-run `ts domo parse` to inspect `notes`.",
+            "",
+        ]
     risk_bits = []
     if st.needs:
         risk_bits.append(f"{st.needs} item(s) flagged NEEDS REVIEW")
@@ -313,6 +333,8 @@ def _review_rows(st: _Stats) -> list[str]:
             rows.append(
                 f"- **Card** `{c.get('title', c.get('urn'))}` ({c.get('chart_type')}, "
                 f"{c.get('status')}) — {c.get('note') or 'rebuild in ThoughtSpot'}")
+    for w in st.join_warnings:
+        rows.append(f"- **Join not emitted / ambiguous** — {w}")
     for m in st.invariants:
         rows.append(f"- **TML invariant** — {m}")
     return rows

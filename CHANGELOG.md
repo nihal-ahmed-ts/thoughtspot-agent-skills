@@ -219,7 +219,7 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
 
 - **`ts-convert-from-domo` — Domo → ThoughtSpot converter** (new skill, v1.0.0). Converts a
   captured **offline** Domo bundle (dataset schemas, Beast Modes, cards, page) into Table +
-  Model TML, Answers and a tabbed Liveboard via a new `ts domo` command group
+  Model TML, Answers and a single-page Liveboard via a new `ts domo` command group
   (`parse` / `build-model` / `build-liveboard` / `report` / `signin`). Beast Mode → ThoughtSpot
   formula translation with the structural cases (multi-branch `CASE`, window/LOD) flagged
   rather than silently downgraded; model joins taken from a Magic ETL export (`--etl`) when
@@ -240,6 +240,21 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
   That gap is reported rather than hidden: each affected card is downgraded to `Approximated`
   with the dropped constructs named, and leads the migration report's Manual review section
   (`open-items.md` #11).
+
+  Post-review correctness fixes (PR #440 review): `UPPER`/`LOWER`/`TRIM`/`LTRIM`/`RTRIM`/
+  `REPLACE` now translate to `sql_string_op` pass-throughs via the shared
+  `formula_common.wrap_passthrough_calls` instead of ThoughtSpot names that do not exist
+  (BL-170/BL-171, rejected at import with error_code 14516), and `SUBSTRING` maps to
+  `substr`; the Beast Mode function map is now expressed as tables so
+  `check_formula_catalog.py` actually guards it. Duplicate Beast Mode names across
+  datasets no longer collapse into a dangling `formula_id`. Join inference emits one join
+  per dataset pair on an id-like key, refuses incidental keys, and places the join on the
+  many side by row count rather than filename order. `--etl` joins are reconciled against
+  the bundle's datasets, with unmatched ones reported rather than counted-then-dropped.
+  Simple-form `CASE expr WHEN` is flagged like the searched form. Non-SUM card
+  aggregations are reported. `--mode domo-cloud` is refused rather than recorded as false
+  provenance. Empty parses no longer render as "Automation 100% — clean conversion"
+  (`open-items.md` #12–#15).
 
 - **`ts-profile-domo` — Domo credential setup** (new skill, v1.0.0). Adds `domo` as a real
   platform to `ts profiles add/list/update/remove/sync-env`: `developer-token` auth, the

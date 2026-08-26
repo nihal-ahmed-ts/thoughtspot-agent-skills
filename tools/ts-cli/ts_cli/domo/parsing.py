@@ -1,8 +1,12 @@
 """Offline parse: a directory of exported Domo JSON -> DomoApp IR + flat inventory.
 
 Files are classified by shape (not filename), so any capture layout matching the
-Domo API responses works. Live (domo-cloud) mode will populate the same IR from the
-four API calls — an open item until a real tenant is available.
+Domo API responses works.
+
+There is no live mode and `mode` is not honoured here: a Domo card's analyzer query is
+not reachable from any Domo API a token can reach, so a live extraction could not fill
+the IR faithfully (see the skill's references/open-items.md #3, #4). `ts domo` refuses
+any --mode other than `offline` rather than recording a mode it did not use.
 """
 from __future__ import annotations
 

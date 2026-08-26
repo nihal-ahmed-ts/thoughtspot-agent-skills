@@ -1,13 +1,13 @@
 ---
 name: ts-convert-from-domo
-description: Convert or import a Domo dashboard into ThoughtSpot — parses a captured OFFLINE directory of Domo JSON (dataset schemas, Beast Modes, cards, page), generates Table + Model TML and Answers/tabbed Liveboard, translates Beast Mode formulas, optionally derives model joins from a Magic ETL export, validates and imports. Direction is always Domo → ThoughtSpot. Not for ThoughtSpot → Domo, not a standalone TML export, and not a live Domo fetch — the input is a bundle already on disk.
+description: Convert or import a Domo dashboard into ThoughtSpot — parses a captured OFFLINE directory of Domo JSON (dataset schemas, Beast Modes, cards, page), generates Table + Model TML and Answers plus a single-page Liveboard, translates Beast Mode formulas, optionally derives model joins from a Magic ETL export, validates and imports. Direction is always Domo → ThoughtSpot. Not for ThoughtSpot → Domo, not a standalone TML export, and not a live Domo fetch — the input is a bundle already on disk.
 ---
 
 # Domo → ThoughtSpot
 
 Converts a Domo dashboard into ThoughtSpot objects through the `ts domo` CLI: parse the Domo
 objects (datasets, Beast Modes, cards, page) → build Table + Model TML → build Answers and one
-tabbed Liveboard → validate and import. Anything it cannot faithfully translate — window Beast
+Liveboard → validate and import. Anything it cannot faithfully translate — window Beast
 Modes, unknown chart types, unresolved fields — is flagged `NEEDS REVIEW` in the migration report
 (`mapping.json`), never silently downgraded to a wrong-but-valid substitute.
 
@@ -78,7 +78,7 @@ Confirm these before Step 0.
 | [../../shared/schemas/thoughtspot-answer-tml.md](../../shared/schemas/thoughtspot-answer-tml.md) | Answer/visualization TML structure |
 | [../../shared/schemas/thoughtspot-liveboard-tml.md](../../shared/schemas/thoughtspot-liveboard-tml.md) | Liveboard TML structure |
 | [../../shared/schemas/thoughtspot-chart-types.md](../../shared/schemas/thoughtspot-chart-types.md) | Verified `answer.chart.type` enum |
-| [../ts-profile-domo/SKILL.md](../ts-profile-domo/SKILL.md) | Domo auth setup (OAuth2 client credentials) |
+| [../ts-profile-domo/SKILL.md](../ts-profile-domo/SKILL.md) | Domo auth setup (developer access token) |
 | [../ts-profile-thoughtspot/SKILL.md](../ts-profile-thoughtspot/SKILL.md) | ThoughtSpot auth setup |
 | [references/coverage-matrix.md](references/coverage-matrix.md) | Mapped/unmapped Domo construct + Beast Mode matrix |
 | [references/migration-report-format.md](references/migration-report-format.md) | Required `mapping.json` / report format |
@@ -174,4 +174,4 @@ NEEDS REVIEW row.
 
 | Version | Date | Summary |
 |---|---|---|
-| 1.0.0 | 2026-08-26 | Initial release. `ts domo parse / build-model / build-liveboard / report` convert an offline Domo bundle into Table + Model TML, Answers and a tabbed Liveboard; Beast Mode → ThoughtSpot formula translation; model joins from a Magic ETL export (`--etl`) or shared-column inference; rich `migration_report.md` (executive summary, scorecard, chasm-trap warning, NEEDS REVIEW first). |
+| 1.0.0 | 2026-08-26 | Initial release. `ts domo parse / build-model / build-liveboard / report` convert an offline Domo bundle into Table + Model TML, Answers and a single-page Liveboard; Beast Mode → ThoughtSpot formula translation; model joins from a Magic ETL export (`--etl`) or shared-column inference; rich `migration_report.md` (executive summary, scorecard, chasm-trap warning, NEEDS REVIEW first). |

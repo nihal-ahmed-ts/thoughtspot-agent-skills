@@ -2541,7 +2541,7 @@ any check carries an ERROR-severity finding.
 ## `ts domo` — Domo → ThoughtSpot converter
 
 Converts a captured **offline** Domo bundle into ThoughtSpot Table + Model TML,
-Answers and a tabbed Liveboard. Mirrors the `ts tableau` / `ts qlik` conventions:
+Answers and a single-page Liveboard. Mirrors the `ts tableau` / `ts qlik` conventions:
 structured JSON to stdout, diagnostics to stderr, pure conversion logic in
 `ts_cli.domo` (the command module does all I/O).
 

@@ -127,3 +127,63 @@ same fixture bundle now honestly reports 56% automation.
 Emitting them for real is deferred: card filters need an operand→ThoughtSpot-preset
 mapping that is still unverified (#8), and Liveboard filter chips need the `quickFilters`
 → filter-chip binding designed. Tracked here rather than silently carried.
+
+## #12 — Six string functions had no ThoughtSpot equivalent — VERIFIED (fixed)
+
+`UPPER`/`LOWER`/`TRIM`/`LTRIM`/`RTRIM`/`REPLACE` were mapped to same-named ThoughtSpot
+functions. None of those exist (BL-170/BL-171, live-disproved on se-thoughtspot
+2026-06-13 and 2026-07-29/30) — a bare call is rejected at import with `error_code
+14516` — and because the translator considered them mapped, the affected formulas were
+reported `Migrated`.
+
+They now go through the shared `formula_common.wrap_passthrough_calls` into a
+`sql_string_op` pass-through, the same mechanism `ts qlik` and `ts powerbi` use.
+`SUBSTRING` was separately mapped to `substring`, which is also not a ThoughtSpot
+function; it now maps to `substr`.
+
+Two gates were blind to this and both are closed:
+- `check_formula_catalog.py` only scans markdown **table rows**, and the Domo function
+  map was written as prose bullets, so ~40 names were never checked. The map is now a
+  set of tables in call form (`| \`ABS(x)\` | \`abs(x)\` | |`) — the shape the validator's
+  regex actually matches. Injecting `upper` into any row now fails the validator.
+- No fixture exercised a string function. `tests/fixtures/domo_edge/` now does, and
+  `tests/test_domo_functions.py::TestMapIntegrity` cross-checks every emitted name
+  against the catalog directly, so a future edit cannot reintroduce the class of bug.
+
+Eight emitted names (`exp`, `hour`, `log`, `minute`, `quarter`, `sign`, `to_date`,
+`week`) are not *in* the catalog — unverified rather than disproved. All eight are
+emitted by the tableau/qlik/sisense maps too, so this converter is no more exposed than
+the rest of the family; the validator warns rather than errors on them.
+
+## #13 — Duplicate Beast Mode names produced a dangling formula reference — VERIFIED (fixed)
+
+`build_model_tml` derives a formula's id from its name, so two datasets each carrying a
+"Net Revenue" Beast Mode — ordinary in Domo — produced two formulas with the same id.
+Downstream dedup then stripped **both**, leaving model columns pointing at a
+`formula_id` that no longer existed (import fails), while the mapping still reported
+both as `Migrated`. Colliding names are now disambiguated by dataset and the rename is
+reported. The converter also now adopts `formula_common.resolve_name_collisions` for
+column↔formula name clashes, which it previously did not handle at all.
+
+## #14 — Join inference was unsound — VERIFIED (fixed)
+
+Three separate problems, all now addressed:
+- One join was emitted **per shared column per dataset pair**, so a pair sharing
+  `id`, `Region` and `Date` produced three joins to the same table.
+- Pairs whose only shared columns were incidental (`Region`, `Date`, `Status`, …) were
+  joined anyway, which fans measures out across the star. Such a pair is now left
+  unjoined and reported instead.
+- The join **side** was decided by dataset iteration order — i.e. bundle filename sort
+  — so the same two datasets could emit `MANY_TO_ONE` or `ONE_TO_MANY` depending on
+  file names. Row counts now decide, and the join is placed on the many (fact) side.
+
+## #15 — `--etl` joins were counted but silently dropped — VERIFIED (fixed)
+
+Magic ETL carries dataflow **action** names, which need not match dataset names. Joins
+whose tables did not resolve were counted in `counts.joins` and listed in
+`mapping.json`, then filtered out of the TML — so the report claimed "Relationships: 7"
+(and emitted a chasm-trap warning) over a model with no joins at all. Names are now
+reconciled against the bundle's datasets; unmatched joins are dropped with a named
+warning, surfaced in the report's Manual review section and counted separately as
+`counts.joins_dropped`. `counts` now describes what was emitted, not what was seen.
+

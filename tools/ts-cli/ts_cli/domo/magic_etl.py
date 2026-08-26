@@ -20,15 +20,25 @@ def _actions(etl: dict) -> list[dict]:
 
 
 def _base_tables(actions: list[dict]) -> dict[str, dict]:
-    """Base tables (LoadFromVault) keyed by action id."""
-    return {
-        a["id"]: {
-            "name": a.get("name", a["id"]),
+    """Base tables (LoadFromVault) keyed by action id.
+
+    An action with no `id` is skipped rather than raising: every other path in this
+    module is best-effort on a malformed export, and a bare KeyError here crashed the
+    whole conversion instead of degrading with a note.
+    """
+    out: dict[str, dict] = {}
+    for a in actions:
+        if a.get("type") != "LoadFromVault":
+            continue
+        aid = a.get("id")
+        if not aid:
+            continue
+        out[aid] = {
+            "name": a.get("name", aid),
             "dataSourceId": a.get("dataSourceId"),
             "renames": [],
         }
-        for a in actions if a.get("type") == "LoadFromVault"
-    }
+    return out
 
 
 def _base_of(aid: Optional[str], by_id: dict, seen: Optional[set] = None) -> Optional[str]:
@@ -94,10 +104,12 @@ def _output_name(actions: list[dict]) -> Optional[str]:
 
 def parse_etl(etl: dict) -> dict:
     """Return {tables:[{name,dataSourceId,renames}], joins:[...], output, notes}."""
-    actions = _actions(etl)
+    actions = [a for a in _actions(etl) if isinstance(a, dict)]
     by_id = {a.get("id"): a for a in actions}
 
     tables = _base_tables(actions)
+    skipped = sum(1 for a in actions
+                  if a.get("type") == "LoadFromVault" and not a.get("id"))
     _apply_renames(actions, tables, by_id)
 
     joins: list[dict] = []
@@ -111,6 +123,8 @@ def parse_etl(etl: dict) -> dict:
         else:
             notes.append(note)
 
+    if skipped:
+        notes.append(f"{skipped} LoadFromVault action(s) had no 'id' and were skipped")
     return {
         "tables": list(tables.values()),
         "joins": joins,

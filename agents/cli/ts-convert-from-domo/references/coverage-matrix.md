@@ -5,7 +5,8 @@ Every Domo construct and its conversion status. Cite in the migration report. Wi
 Mapped: **Migrated** (faithful/deterministic) · **Approximated** (mapped with a caveat,
 verify). Anything a human must resolve is **NEEDS REVIEW** and is listed under Unmapped
 Constructs. Source of truth for the formula rows is
-`tools/ts-cli/ts_cli/domo/functions.py` (`AGG_MAP` / `FUNCTION_MAP` / `UNSUPPORTED`).
+`tools/ts-cli/ts_cli/domo/functions.py` (`FUNCTION_MAP` / `PASSTHROUGH_MAP` /
+`_UNSUPPORTED_RE`).
 
 ## Mapped Constructs
 
@@ -30,7 +31,7 @@ Constructs. Source of truth for the formula rows is
 | Construct | ThoughtSpot target | Status | Notes |
 |---|---|---|---|
 | `groupBy[]` | attribute columns (rows / x-axis) | Migrated | |
-| `columns[].aggregation` | measure aggregation | Migrated | see `AGG_MAP` |
+| `columns[].aggregation` = `SUM` | measure aggregation | Migrated | matches the Model default for numeric columns |
 | `limit` | Answer row limit (`top N`) | Migrated | not applied to KPI cards |
 | `chartType` `kpi` / `bar` / `table` | Answer `display_mode` + `chart.type` | Migrated | |
 
@@ -53,7 +54,8 @@ for the full function/aggregation table.
 | `SUM` / `AVG` / `MIN` / `MAX` / `COUNT` / `COUNT DISTINCT` | `sum` / `average` / `min` / `max` / `count` / `unique count` | Migrated | |
 | `DATEDIFF` | `diff_days` | Approximated | Domo grain argument dropped — day grain assumed; verify arg order (Domo may return b−a) |
 | `STDDEV` / `VARIANCE` | `stddev` / `variance` | Approximated | verify sample vs population |
-| String functions (`CONCAT`, `UPPER`, `LOWER`, `SUBSTRING`, …) | same-named TS functions | Migrated | |
+| `CONCAT` / `LENGTH` / `SUBSTRING` / `LEFT` / `RIGHT` / `INSTR` | `concat` / `strlen` / `substr` / `left` / `right` / `strpos` | Migrated | note `substr`, **not** `substring` |
+| `UPPER` / `LOWER` / `TRIM` / `LTRIM` / `RTRIM` / `REPLACE` | `sql_string_op` pass-through | Migrated | these six do **not** exist as ThoughtSpot functions (BL-170/BL-171) — a bare call is rejected at import (error_code 14516), so they are translated to a warehouse-evaluated `sql_string_op` via the shared `formula_common.wrap_passthrough_calls` |
 
 ## Unmapped Constructs
 
@@ -75,6 +77,7 @@ migration report.
 | Card `filters[]` — incl. `IN`, `NOT_IN`, `BETWEEN`, `LAST_N_DAYS`, `THIS_MONTH`, `YTD`, `dateRangeFilter` | No filter is emitted onto the Answer or Liveboard | Parsed into the IR, then dropped — reported per card. **The Answer will show unfiltered, all-time data** |
 | Card `quickFilters[]` | Not emitted as a Liveboard filter chip | Parsed into the IR, then dropped — reported per card |
 | Card `conditionalFormats[]` | Not emitted | Parsed into the IR, then dropped — reported per card |
+| Card `columns[].aggregation` other than `SUM` (`MIN`/`MAX`/`AVG`/`COUNT`) | No aggregation is emitted onto the Answer | The Answer falls back to the Model default (SUM for numerics), so a `MIN(Price)` card would read as `SUM(Price)`. Reported per card as `Approximated` |
 | Domo column `format` (CURRENCY / NUMBER / percent / precision) | No number format is emitted | Parsed into the IR, then dropped — reported per card |
 | Card drill paths and card-to-card links | No ThoughtSpot equivalent modelled yet | Deferred |
 | Multi-page Domo apps | One page → one Liveboard today | Deferred |

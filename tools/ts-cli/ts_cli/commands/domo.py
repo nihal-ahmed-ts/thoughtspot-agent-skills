@@ -12,6 +12,28 @@ import typer
 
 app = typer.Typer(help="Domo → ThoughtSpot conversion from a captured offline bundle.")
 
+_MODE_HELP = "Extraction mode. Only 'offline' is implemented."
+
+
+def _check_mode(mode: str) -> str:
+    """Reject any mode other than offline.
+
+    `parse_app` ignores `mode` but stored it, and the report prints it as
+    **Source mode**, so `--mode domo-cloud` produced a customer-facing document
+    claiming a live extraction that never happened. A live path is not wired up at
+    all (see the skill's references/open-items.md #3, #4), so the value is refused
+    rather than recorded.
+    """
+    if (mode or "").strip().lower() != "offline":
+        typer.echo(
+            f"Unsupported --mode {mode!r}. Only 'offline' is implemented: a Domo card's "
+            "analyzer query is not reachable from any Domo API, so there is no live "
+            "conversion path (see the ts-convert-from-domo skill, references/"
+            "open-items.md #3/#4). Capture a bundle and pass the directory.",
+            err=True)
+        raise typer.Exit(2)
+    return "offline"
+
 
 @app.command("signin")
 def signin_cmd(
@@ -43,11 +65,11 @@ def signin_cmd(
 def parse_cmd(
     input_dir: str = typer.Argument(..., help="Directory of exported Domo JSON"),
     output_file: str = typer.Option(..., "--output", "-o", help="Output inventory JSON path"),
-    mode: str = typer.Option("offline", "--mode", help="offline | domo-cloud"),
+    mode: str = typer.Option("offline", "--mode", help=_MODE_HELP),
 ) -> None:
     from ts_cli.domo.parsing import build_inventory, parse_app
 
-    app_ir = parse_app(input_dir, mode=mode)
+    app_ir = parse_app(input_dir, mode=_check_mode(mode))
     inv = build_inventory(app_ir)
     out = Path(output_file)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -64,21 +86,26 @@ def build_model_cmd(
     schema: str = typer.Option(..., "--schema", help="Warehouse schema"),
     model_name: Optional[str] = typer.Option(None, "--model-name", "-m"),
     output_dir: str = typer.Option("out", "--output-dir", "-o"),
-    mode: str = typer.Option("offline", "--mode"),
+    mode: str = typer.Option("offline", "--mode", help=_MODE_HELP),
     etl: Optional[str] = typer.Option(None, "--etl",
         help="Domo Magic ETL export JSON — drives model joins from the dataflow's join graph"),
 ) -> None:
-    import json as _json
-
     from ts_cli.domo.build_model import build_model_artifacts
     from ts_cli.domo.parsing import parse_app
     from ts_cli.tml_common import dump_tml_yaml
 
-    app_ir = parse_app(input_dir, mode=mode)
+    app_ir = parse_app(input_dir, mode=_check_mode(mode))
     explicit_joins = None
     if etl:
         from ts_cli.domo.magic_etl import parse_etl
-        explicit_joins = parse_etl(_json.load(open(etl)))["joins"]
+        etl_path = Path(etl)
+        if not etl_path.is_file():
+            typer.echo(f"Magic ETL export not found: {etl}", err=True)
+            raise typer.Exit(2)
+        parsed = parse_etl(json.loads(etl_path.read_text()))
+        explicit_joins = parsed["joins"]
+        for note in parsed.get("notes", []):
+            typer.echo(f"  ETL note: {note}", err=True)
         typer.echo(f"Using {len(explicit_joins)} join(s) from Magic ETL {etl}", err=True)
     arts = build_model_artifacts(
         app_ir, connection_name=connection_name, db=database, schema=schema,
@@ -89,6 +116,8 @@ def build_model_cmd(
         (out / fn).write_text(dump_tml_yaml(doc))
     (out / arts["model"]["filename"]).write_text(dump_tml_yaml(arts["model"]["tml"]))
     (out / "mapping.json").write_text(json.dumps(arts["mapping"], indent=2))
+    for w in arts["mapping"].get("join_warnings", []):
+        typer.echo(f"  NEEDS REVIEW: {w}", err=True)
     typer.echo(f"Model artifacts → {output_dir}", err=True)
     print(json.dumps({"counts": arts["counts"], "model": arts["model"]["filename"]}, indent=2))
 
@@ -104,7 +133,13 @@ def report_cmd(
     from ts_cli.domo.report import render_report
 
     out = Path(output_dir)
-    mapping = json.loads((out / "mapping.json").read_text())
+    mapping_path = out / "mapping.json"
+    if not mapping_path.is_file():
+        typer.echo(
+            f"No mapping.json in {output_dir}. Run `ts domo build-model` first "
+            "(and `ts domo build-liveboard` to include the cards).", err=True)
+        raise typer.Exit(2)
+    mapping = json.loads(mapping_path.read_text())
     lb_path = out / "liveboard_mapping.json"
     lb = json.loads(lb_path.read_text()) if lb_path.exists() else None
     md = render_report(mapping, lb)
@@ -121,13 +156,13 @@ def build_liveboard_cmd(
     model_fqn: Optional[str] = typer.Option(None, "--model-fqn", help="TS Model GUID (optional)"),
     report_name: Optional[str] = typer.Option(None, "--report-name"),
     output_dir: str = typer.Option("out", "--output-dir", "-o"),
-    mode: str = typer.Option("offline", "--mode"),
+    mode: str = typer.Option("offline", "--mode", help=_MODE_HELP),
 ) -> None:
     from ts_cli.domo.answers import build_liveboard_artifacts
     from ts_cli.domo.parsing import parse_app
     from ts_cli.tml_common import dump_tml_yaml
 
-    app_ir = parse_app(input_dir, mode=mode)
+    app_ir = parse_app(input_dir, mode=_check_mode(mode))
     arts = build_liveboard_artifacts(
         app_ir, model_name=model_name, model_fqn=model_fqn, report_name=report_name)
     out = Path(output_dir)

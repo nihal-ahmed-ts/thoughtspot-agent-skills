@@ -2,8 +2,11 @@
 # Domo Beast Mode → ThoughtSpot formula translation
 
 The translation map behind `ts domo build-model`. The authoritative source is
-`tools/ts-cli/ts_cli/domo/beastmode.py` (`AGG_MAP` / `FUNCTION_MAP` / `UNSUPPORTED`); this doc
-must agree with the code. Strategy (same as the rest of the family): deterministically translate
+`tools/ts-cli/ts_cli/domo/functions.py` (`FUNCTION_MAP` / `PASSTHROUGH_MAP` /
+`_UNSUPPORTED_RE`); this doc must agree with the code. The tables below are tables, not
+prose, on purpose: `tools/validate/check_formula_catalog.py` only scans markdown table
+rows, so a prose function list is invisible to it — and that is exactly how six invalid
+function names shipped in the first revision of this PR. Strategy (same as the rest of the family): deterministically translate
 the common subset; emit everything else as **NEEDS REVIEW** with the original Beast Mode
 preserved — never faked. Coverage → status: `AUTO → Migrated`, `PARTIAL → Approximated`,
 `MANUAL → NEEDS REVIEW`.
@@ -45,17 +48,71 @@ Used both as a card column `aggregation` and inside Beast Mode formulas.
 
 Function names are token-rewritten; arguments pass through unchanged.
 
-**Math** — `ABS`→`abs`, `ROUND`→`round`, `FLOOR`→`floor`, `CEIL`/`CEILING`→`ceil`,
-`POWER`/`POW`→`pow`, `SQRT`→`sqrt`, `EXP`→`exp`, `LN`→`ln`, `LOG`→`log`, `MOD`→`mod`, `SIGN`→`sign`.
+### Math
 
-**String** — `CONCAT`→`concat`, `UPPER`→`upper`, `LOWER`→`lower`, `TRIM`→`trim`, `LTRIM`→`ltrim`,
-`RTRIM`→`rtrim`, `LENGTH`/`LEN`→`strlen`, `SUBSTRING`/`SUBSTR`→`substring`, `REPLACE`→`replace`,
-`LEFT`→`left`, `RIGHT`→`right`, `INSTR`→`strpos`.
+| Domo | ThoughtSpot | Notes |
+|---|---|---|
+| `ABS(x)` | `abs(x)` |  |
+| `ROUND(x)` | `round(x)` | 2-arg form: TS 2nd arg is a rounding increment, not a decimal-place count |
+| `FLOOR(x)` | `floor(x)` |  |
+| `CEIL(x)` / `CEILING(x)` | `ceil(x)` |  |
+| `POWER(x, n)` / `POW(x, n)` | `pow(x, n)` |  |
+| `SQRT(x)` | `sqrt(x)` |  |
+| `EXP(x)` | `exp(x)` |  |
+| `LN(x)` | `ln(x)` |  |
+| `LOG(x)` | `log(x)` |  |
+| `MOD(a, b)` | `mod(a, b)` |  |
+| `SIGN(x)` | `sign(x)` |  |
 
-**Date** — `YEAR`→`year`, `MONTH`→`month`, `DAY`→`day`, `HOUR`→`hour`, `MINUTE`→`minute`,
-`QUARTER`→`quarter`, `WEEK`→`week`, `NOW`→`now`, `CURRENT_DATE`→`today`.
+### String
 
-**Type** — `TO_NUMBER`→`to_double`, `TO_CHAR`/`TO_STRING`→`to_string`, `TO_DATE`→`to_date`.
+| Domo | ThoughtSpot | Notes |
+|---|---|---|
+| `CONCAT(a, b)` | `concat(a, b)` | N args; `+` is numeric-only and does not join strings |
+| `LENGTH(x)` / `LEN(x)` | `strlen(x)` |  |
+| `SUBSTRING(x, s, n)` / `SUBSTR(x, s, n)` | `substr(x, s, n)` | zero-indexed start; `substring (` does not exist |
+| `LEFT(x, n)` | `left(x, n)` |  |
+| `RIGHT(x, n)` | `right(x, n)` |  |
+| `INSTR(x, v)` | `strpos(x, v)` | 1-indexed, returns 0 when not found |
+
+### Date
+
+| Domo | ThoughtSpot | Notes |
+|---|---|---|
+| `YEAR(d)` | `year(d)` |  |
+| `MONTH(d)` | `month(d)` |  |
+| `DAY(d)` | `day(d)` |  |
+| `HOUR(d)` | `hour(d)` |  |
+| `MINUTE(d)` | `minute(d)` |  |
+| `QUARTER(d)` | `quarter(d)` |  |
+| `WEEK(d)` | `week(d)` |  |
+| `NOW()` | `now()` |  |
+| `CURRENT_DATE()` | `today()` |  |
+
+### Type
+
+| Domo | ThoughtSpot | Notes |
+|---|---|---|
+| `TO_NUMBER(x)` / `TO_DOUBLE(x)` | `to_double(x)` |  |
+| `TO_CHAR(x)` / `TO_STRING(x)` | `to_string(x)` |  |
+| `TO_DATE(x)` | `to_date(x)` |  |
+
+## SQL pass-throughs (`PASSTHROUGH_MAP`) — Migrated
+
+These six Domo functions have **no ThoughtSpot equivalent** — a bare call is rejected at
+import with `error_code 14516` (BL-170/BL-171, live-disproved on se-thoughtspot 2026-06-13
+for `upper`/`lower` and 2026-07-29/30 for the rest). They are translated into a
+`sql_string_op` pass-through the warehouse evaluates, via the shared
+`formula_common.wrap_passthrough_calls` — the same mechanism `ts qlik` and `ts powerbi` use.
+
+| Domo | ThoughtSpot | Notes |
+|---|---|---|
+| `UPPER(x)` | `sql_string_op ( 'UPPER({0})' , [x] )` | `upper` does not exist in TS |
+| `LOWER(x)` | `sql_string_op ( 'LOWER({0})' , [x] )` | `lower` does not exist in TS |
+| `TRIM(x)` | `sql_string_op ( 'TRIM({0})' , [x] )` | `trim` does not exist in TS |
+| `LTRIM(x)` | `sql_string_op ( 'LTRIM({0})' , [x] )` | `ltrim` does not exist in TS |
+| `RTRIM(x)` | `sql_string_op ( 'RTRIM({0})' , [x] )` | `rtrim` does not exist in TS |
+| `REPLACE(x, old, new)` | `sql_string_op ( 'REPLACE({0}, {1}, {2})' , [x] , old , new )` | `replace` does not exist in TS |
 
 ## Approximated (translated, verify)
 

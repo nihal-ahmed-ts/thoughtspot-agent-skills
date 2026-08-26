@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ts_cli.databricks.mv_tml import validate_tml_invariants
+from ts_cli.formula_common import resolve_name_collisions
 from ts_cli.model_builder import build_model_tml
 
 from .functions import translate
@@ -56,21 +57,91 @@ def _build_table_doc(ds: Dataset, connection_name: str, db: str, schema: str,
     }}
 
 
-def _infer_joins(datasets: list[Dataset]) -> tuple[list[dict], list[tuple]]:
-    """Domo carries no join metadata — infer by shared column name and flag."""
+# Columns whose shared name is almost never a real relationship — joining on them
+# silently fans out measures. A pair whose ONLY shared column is one of these is not
+# joined at all; it is reported instead.
+_INCIDENTAL_KEYS = {
+    "date", "day", "month", "year", "quarter", "week", "region", "country", "state",
+    "city", "status", "type", "category", "name", "description", "created_at",
+    "updated_at", "currency", "segment",
+}
+
+
+def _looks_like_key(name: str) -> bool:
+    low = name.strip().lower()
+    return low.endswith("id") or low.endswith("_key") or low.endswith(" key") \
+        or low.endswith("code") or low.endswith("urn")
+
+
+def _pick_join_key(shared: set[str]) -> tuple[str | None, str]:
+    """Choose ONE join key for a dataset pair. Returns (key, note_suffix)."""
+    ranked = sorted(shared)
+    keyish = [c for c in ranked if _looks_like_key(c)]
+    if len(keyish) == 1:
+        return keyish[0], ""
+    if len(keyish) > 1:
+        return keyish[0], (f"{len(keyish)} id-like columns shared "
+                           f"({', '.join(keyish)}) — picked the first")
+    meaningful = [c for c in ranked if c.strip().lower() not in _INCIDENTAL_KEYS]
+    if not meaningful:
+        return None, (f"only incidental column(s) shared ({', '.join(ranked)}) — "
+                      "no join inferred; supply --etl or join by hand")
+    return meaningful[0], (f"no id-like column shared; picked '{meaningful[0]}' from "
+                           f"{', '.join(ranked)}")
+
+
+def _infer_joins(datasets: list[Dataset]) -> tuple[list[dict], list[tuple], list[str]]:
+    """Domo carries no join metadata — infer ONE join per dataset pair, and flag.
+
+    Emitting one join per shared column (the previous behaviour) produced duplicate
+    `with:` entries for the same table pair and joined on incidental names like
+    `Region` or `Date`, which fans measures out across the star.
+    """
     joins: list[dict] = []
     notes: list[tuple] = []
+    warnings: list[str] = []
     for i in range(len(datasets)):
         for j in range(i + 1, len(datasets)):
             a, b = datasets[i], datasets[j]
             shared = {c.name for c in a.columns} & {c.name for c in b.columns}
-            for key in sorted(shared):
-                joins.append({
-                    "left_table": a.name, "right_table": b.name, "type": "LEFT_OUTER",
-                    "keys": [{"left": key, "right": key}],
-                })
-                notes.append((a.name, b.name, key))
-    return joins, notes
+            if not shared:
+                continue
+            key, note = _pick_join_key(shared)
+            if key is None:
+                warnings.append(f"{a.name} ↔ {b.name}: {note}")
+                continue
+            if note:
+                warnings.append(f"{a.name} ↔ {b.name}: {note}")
+            joins.append({
+                "left_table": a.name, "right_table": b.name, "type": "LEFT_OUTER",
+                "keys": [{"left": key, "right": key}],
+            })
+            notes.append((a.name, b.name, key))
+    return joins, notes, warnings
+
+
+def _orient_joins(joins: list[dict], rows_by_table: dict[str, int]) -> list[str]:
+    """Put each join on the MANY (fact) side, in place. Returns notes.
+
+    The join must live on the source/FK side only. Which dataset that is was
+    previously decided by bundle iteration order (i.e. filename sort), so the same
+    two datasets could emit MANY_TO_ONE or ONE_TO_MANY depending on file names.
+    Row counts decide it when known.
+    """
+    notes: list[str] = []
+    for j in joins:
+        left, right = j.get("left_table"), j.get("right_table")
+        lr, rr = rows_by_table.get(left, 0), rows_by_table.get(right, 0)
+        if lr and rr and lr < rr:
+            # left is the smaller (dimension) side — flip so the join sits on the fact
+            j["left_table"], j["right_table"] = right, left
+            j["keys"] = [{"left": k.get("right"), "right": k.get("left")}
+                         for k in j.get("keys", [])]
+        elif not (lr and rr):
+            notes.append(
+                f"{left} ↔ {right}: row counts unknown, so the many-side could not be "
+                f"determined — join placed on '{left}'. Confirm the direction.")
+    return notes
 
 
 def _build_tables_and_columns(app: DomoApp, connection_name: str, db: str, schema: str,
@@ -108,36 +179,102 @@ def _build_tables_and_columns(app: DomoApp, connection_name: str, db: str, schem
 
 
 def _resolve_joins(app: DomoApp,
-                   explicit_joins: Optional[list]) -> tuple[list, list, str]:
-    """Return (joins, join_notes, join_source) — ETL-derived joins win over inference."""
+                   explicit_joins: Optional[list]) -> tuple[list, list, str, list[str]]:
+    """Return (joins, join_notes, join_source, warnings).
+
+    ETL-derived joins win over inference, but only those whose table names actually
+    resolve to a dataset in this bundle. Magic ETL carries dataflow ACTION names, which
+    often differ from dataset names — unmatched joins were previously counted and
+    reported while being silently dropped from the TML.
+    """
     if explicit_joins is not None:
-        notes = [
-            (j["left_table"], j["right_table"],
-             ", ".join(k["left"] for k in j.get("keys", [])))
-            for j in explicit_joins]
-        return explicit_joins, notes, "magic_etl"
-    joins, notes = _infer_joins(app.datasets)
-    return joins, notes, "shared_column_name"
+        known = {d.name for d in app.datasets}
+        matched, warnings = [], []
+        for j in explicit_joins:
+            left, right = j.get("left_table"), j.get("right_table")
+            missing = [t for t in (left, right) if t not in known]
+            if missing:
+                warnings.append(
+                    f"ETL join {left} ↔ {right}: {', '.join(missing)} does not match any "
+                    "dataset in the bundle (Magic ETL uses dataflow action names) — "
+                    "join dropped")
+                continue
+            matched.append(j)
+        notes = [(j["left_table"], j["right_table"],
+                  ", ".join(k["left"] for k in j.get("keys", [])))
+                 for j in matched]
+        return matched, notes, "magic_etl", warnings
+    joins, notes, warnings = _infer_joins(app.datasets)
+    return joins, notes, "shared_column_name", warnings
+
+
+# Translations that are mapped but need a human to confirm semantics. `build_model_tml`
+# derives each formula's id from its NAME, so a duplicate name means a duplicate id.
+_APPROXIMATE_MARKERS = ("diff_days(", "stddev(", "variance(")
+
+
+def _formula_status(ts_expr: str, review: bool) -> tuple[str, str]:
+    """Map a translation onto the report's three-value status vocabulary."""
+    if review:
+        return "NEEDS REVIEW", ""
+    low = ts_expr.lower()
+    if "diff_days(" in low:
+        return "Approximated", ("DATEDIFF → diff_days assumes DAY grain and TS argument "
+                               "order (a−b) — verify the sign and the unit")
+    if "stddev(" in low or "variance(" in low:
+        return "Approximated", "verify sample vs population"
+    return "Migrated", ""
 
 
 def _translate_beast_modes(app: DomoApp) -> tuple[list, list]:
-    """Translate global + card-local Beast Modes, deduped by (data_source_id, name)."""
+    """Translate global + card-local Beast Modes, deduped by (data_source_id, name).
+
+    Names must be unique across datasets: `build_model_tml` derives each formula id
+    from the name, so two datasets each carrying (say) a "Net Revenue" Beast Mode —
+    ordinary in Domo — produced two formulas with the same id. Downstream dedup then
+    stripped BOTH, leaving the model columns pointing at a `formula_id` that no longer
+    existed (a dangling reference; import fails) while the mapping still called them
+    Migrated. Collisions are therefore disambiguated by dataset.
+    """
     all_bm = list(app.beast_modes)
     for card in app.cards:
         all_bm.extend(card.calc_fields)
 
+    ds_name = {d.id: d.name for d in app.datasets}
+    counts: dict[str, int] = {}
+    for bm in all_bm:
+        if bm.name:
+            counts[bm.name] = counts.get(bm.name, 0) + 1
+
     seen: set = set()
+    used_names: set = set()
     translated: list[dict] = []
     mapping_formulas: list[dict] = []
     for bm in all_bm:
         if not bm.name or (bm.data_source_id, bm.name) in seen:
             continue
         seen.add((bm.data_source_id, bm.name))
+
+        name = bm.name
+        if counts.get(bm.name, 0) > 1 and name in used_names:
+            suffix = ds_name.get(bm.data_source_id) or str(bm.data_source_id)
+            name = f"{bm.name} ({suffix})"
+        n, i = name, 2
+        while n in used_names:            # last-resort guard: still not unique
+            n, i = f"{name} {i}", i + 1
+        name = n
+        used_names.add(name)
+
         ts_expr, review, reason = translate(bm.formula)
-        translated.append({"name": bm.name, "expr": ts_expr, "column_type": "MEASURE"})
+        status, extra = _formula_status(ts_expr, review)
+        notes = [x for x in (reason, extra) if x]
+        if name != bm.name:
+            notes.append(f"renamed from '{bm.name}' — the same Beast Mode name exists on "
+                         "another dataset and formula ids must be unique")
+        translated.append({"name": name, "expr": ts_expr, "column_type": "MEASURE"})
         mapping_formulas.append({
-            "name": bm.name, "domo_formula": bm.formula, "ts_formula": ts_expr,
-            "status": "NEEDS REVIEW" if review else "Migrated", "note": reason,
+            "name": name, "domo_name": bm.name, "domo_formula": bm.formula,
+            "ts_formula": ts_expr, "status": status, "note": "; ".join(notes),
         })
     return translated, mapping_formulas
 
@@ -210,19 +347,34 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
 
     table_docs, tables, columns, renamed_cols = _build_tables_and_columns(
         app, connection_name, db, schema, type_overrides)
-    joins, join_notes, join_source = _resolve_joins(app, explicit_joins)
+    joins, join_notes, join_source, join_warnings = _resolve_joins(app, explicit_joins)
     translated, mapping_formulas = _translate_beast_modes(app)
+
+    rows_by_table = {ds.name: (ds.rows or 0) for ds in app.datasets}
+    join_warnings += _orient_joins(joins, rows_by_table)
+    # Re-derive the notes AFTER orientation so the report names the same sides the TML does.
+    join_notes = [(j["left_table"], j["right_table"],
+                   ", ".join(k["left"] for k in j.get("keys", [])))
+                  for j in joins]
+
+    # A column and a formula cannot share a display name (shared helper, used by
+    # tableau / snowflake-sv / sisense / databricks) — the formula wins.
+    columns, translated, _renames = resolve_name_collisions(columns, translated, [])
 
     model_tml = build_model_tml(
         model_name=model_name, connection_name=connection_name, tables=tables,
         columns=columns, joins=joins, parameters=[], translated_formulas=translated)
     _apply_join_fixes(model_tml, joins, app)
 
+    mapping = _build_mapping(app, join_notes, join_source, mapping_formulas,
+                             renamed_cols, table_docs)
+    mapping["join_warnings"] = join_warnings
     return {
         "tables": table_docs,
         "model": {"filename": f"{_slug(model_name)}.model.tml", "tml": model_tml},
-        "mapping": _build_mapping(app, join_notes, join_source, mapping_formulas,
-                                  renamed_cols, table_docs),
+        "mapping": mapping,
+        # counts describe what was EMITTED, not what was seen — the join count used to
+        # report parsed-but-dropped ETL joins.
         "counts": {"tables": len(tables), "formulas": len(translated),
-                   "joins": len(joins)},
+                   "joins": len(joins), "joins_dropped": len(join_warnings)},
     }

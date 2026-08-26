@@ -15,7 +15,10 @@ FIXTURES = str(Path(__file__).parent / "fixtures" / "domo")
 
 
 def test_translate_deterministic_functions():
-    assert translate("UPPER(`Name`)") == ("upper([Name])", False, "")
+    # `upper` does not exist in ThoughtSpot (BL-170/BL-171) — this asserted the old,
+    # import-rejected output. See test_domo_functions.py for the full pass-through suite.
+    assert translate("UPPER(`Name`)") == (
+        "sql_string_op('UPPER({0})', [Name])", False, "")
     assert translate("DATEDIFF(`delivered`, `purchased`)")[0] == "diff_days([delivered], [purchased])"
     assert translate("LENGTH(`Ticket`)")[0] == "strlen([Ticket])"
 
