@@ -18,6 +18,7 @@ import re
 from typing import Any, Optional
 
 from .ir import Chart, QlikApp
+from ts_cli.tml_common import derive_viz_obj_id
 
 # Qlik viz object type -> ThoughtSpot chart type.
 _CHART_MAP = {
@@ -133,7 +134,9 @@ def _viz(
 
     table_ref: dict[str, Any] = {"name": model_name}
     if model_fqn:
-        table_ref["fqn"] = model_fqn
+        # obj_id, not a bare viz-level fqn — the latter is dropped on import
+        # and leaves the viz with no data source (audit 14.2).
+        table_ref["obj_id"] = derive_viz_obj_id(model_name, model_fqn)
 
     answer: dict[str, Any] = {
         "name": chart.title or chart.id,
