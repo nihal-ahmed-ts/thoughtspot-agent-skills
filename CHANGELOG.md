@@ -283,8 +283,8 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
 
 ### Changed
 
-- chore: bump ts-cli to v0.133.0 — new `ts domo` command group and `domo` platform support in
-  `ts profiles`.
+- chore: bump ts-cli to v0.134.0 — new `ts domo` command group and `domo` platform support in
+  `ts profiles`. (0.133.0 was taken by #469 on main while this branch was in review.)
 - Refactored `ts_cli/domo/{report,build_model,magic_etl,answers}.py` into per-section /
   per-concern helpers so every function lands under the cyclomatic-complexity cap; output is
   byte-identical (verified against captured fixture output).
