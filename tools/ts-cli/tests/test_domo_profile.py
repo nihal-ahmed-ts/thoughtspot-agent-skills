@@ -153,3 +153,106 @@ class TestSigninCommand:
         result = runner.invoke(app, ["domo", "signin", "--profile", "Acme"])
         assert result.exit_code == 1
         assert "FAILED" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Credential-path hardening (PR #440 third review)
+#
+# Each test here corresponds to a reproduced way the Domo developer token could
+# leave the machine, or a way a mistyped/hostile instance URL became an SSRF or
+# exfiltration primitive. The token travels in a CUSTOM header, so the stdlib's
+# protections for `Authorization` do not apply to it.
+# ---------------------------------------------------------------------------
+
+
+class TestInstanceValidation:
+    @pytest.mark.parametrize("instance,because", [
+        ("http://acme.domo.com", "plain HTTP would send the token in cleartext"),
+        ("https://acme.domo.com@example.com", "userinfo redirects the real host"),
+        ("https://evil.com/?x=", "a query string turns every path into a parameter"),
+        ("https://acme.domo.com/some/path", "a path prefix is not a bare origin"),
+        ("169.254.169.254", "cloud metadata service"),
+        ("127.0.0.1", "loopback"),
+        ("10.1.2.3", "private range"),
+        ("192.168.0.9", "private range"),
+        ("[::1]", "IPv6 loopback"),
+        ("", "empty"),
+    ])
+    def test_refused(self, instance, because):
+        from ts_cli.domo.client import DomoError, normalise_instance
+        with pytest.raises(DomoError):
+            normalise_instance(instance)
+
+    @pytest.mark.parametrize("instance,expected", [
+        ("acme.domo.com", "https://acme.domo.com"),
+        ("https://acme.domo.com", "https://acme.domo.com"),
+        ("https://acme.domo.com/", "https://acme.domo.com"),
+        ("  https://acme.domo.com  ", "https://acme.domo.com"),
+    ])
+    def test_accepted(self, instance, expected):
+        from ts_cli.domo.client import normalise_instance
+        assert normalise_instance(instance) == expected
+
+    def test_no_bypass_flag_exists(self):
+        """A security control with an override is not a control."""
+        import inspect
+
+        from ts_cli.domo import client
+        src = inspect.getsource(client)
+        for knob in ("verify=False", "allow_http", "insecure", "skip_verify",
+                     "ssl._create_unverified"):
+            assert knob not in src, f"bypass knob present: {knob}"
+
+
+class TestRedirectsAreRefused:
+    def test_handler_raises_rather_than_following(self):
+        """urllib rebuilds custom headers onto the redirect target."""
+        from ts_cli.domo.client import DomoError, _NoRedirect
+        with pytest.raises(DomoError) as e:
+            _NoRedirect().redirect_request(
+                None, None, 302, "Found", {}, "https://evil.example/steal")
+        assert "refusing to follow" in str(e.value)
+
+    def test_client_installs_the_handler(self):
+        from ts_cli.domo.client import DomoClient, _NoRedirect
+        c = DomoClient("acme.domo.com", "tok")
+        assert any(isinstance(h, _NoRedirect) for h in c._opener.handlers)
+
+
+class TestServerTextNeverReachesTheTerminal:
+    def test_http_error_body_is_not_interpolated(self, monkeypatch):
+        """`ts domo signin` prints DomoError text; the body is chosen by the host."""
+        import urllib.error
+
+        from ts_cli.domo.client import DomoClient, DomoError
+
+        c = DomoClient("acme.domo.com", "tok")
+
+        import io
+
+        def _raise(*_a, **_k):
+            raise urllib.error.HTTPError(
+                "https://acme.domo.com/x", 403, "Forbidden", {},
+                io.BytesIO(b"ECHOED-SECRET-TOKEN-abc123"))
+
+        monkeypatch.setattr(c._opener, "open", _raise)
+        with pytest.raises(DomoError) as e:
+            c.list_datasets()
+        assert "ECHOED-SECRET" not in str(e.value)
+        assert "403" in str(e.value)
+
+
+class TestTokenIsNotAConstructorLocal:
+    def test_profile_path_defers_resolution(self, domo_profiles, monkeypatch):
+        """A raw secret in a frame can be rendered into a traceback panel."""
+        _write(domo_profiles, [{"name": "Acme", "instance": "https://acme.domo.com",
+                                "token_env": "DOMO_TOK_LAZY"}])
+        monkeypatch.setenv("DOMO_TOK_LAZY", "tok-lazy")
+        c = domo_client.client_from_profile()
+        assert c._token is None, "the resolved secret must not be stored on the client"
+        assert c._token_provider is not None
+        assert c._headers()["X-DOMO-Developer-Token"] == "tok-lazy"
+
+    def test_typer_never_renders_locals(self):
+        from ts_cli.cli import app
+        assert app.pretty_exceptions_show_locals is False

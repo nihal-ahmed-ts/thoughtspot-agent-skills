@@ -117,23 +117,36 @@ _ARITY: dict[str, tuple[int, str]] = {
 }
 
 
-def _arity_of(call: str, expr: str) -> Optional[int]:
-    """Count top-level arguments of the first `call(` in `expr`, or None."""
-    i = expr.lower().find(call + "(")
-    if i < 0:
-        return None
-    depth, args, seen = 0, 1, False
-    for ch in expr[i + len(call):]:
-        if ch == "(":
-            depth += 1
-            seen = True
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        elif ch == "," and depth == 1:
-            args += 1
-    return args if seen else None
+def _arities_of(call: str, expr: str) -> list[int]:
+    """Top-level argument counts for EVERY `call(` in `expr`.
+
+    One `find()` was not enough: a valid 2-arg call ahead of an invalid one hid it,
+    so `diff_days([a],[b]) + diff_days('month',[a],[b])` shipped unflagged.
+    """
+    out: list[int] = []
+    low = expr.lower()
+    needle = call + "("
+    start = 0
+    while True:
+        i = low.find(needle, start)
+        if i < 0:
+            return out
+        depth, args, seen = 0, 1, False
+        j = i + len(call)
+        for ch in expr[j:]:
+            j += 1
+            if ch == "(":
+                depth += 1
+                seen = True
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch == "," and depth == 1:
+                args += 1
+        if seen:
+            out.append(args)
+        start = i + len(needle)
 
 
 def translate(expr: str) -> tuple[str, bool, str]:
@@ -188,10 +201,11 @@ def translate(expr: str) -> tuple[str, bool, str]:
     #    (wrong arity, unbalanced parens) is flagged rather than emitted — a bare
     #    upper/trim/replace call is rejected at import with error_code 14516.
     for call, (expected, advice) in _ARITY.items():
-        found = _arity_of(call, out)
-        if found is not None and found != expected:
+        wrong = sorted({n for n in _arities_of(call, out) if n != expected})
+        if wrong:
             review = True
-            reasons.append(f"'{call}' called with {found} argument(s), expected "
+            counts = ", ".join(str(n) for n in wrong)
+            reasons.append(f"'{call}' called with {counts} argument(s), expected "
                            f"{expected} — {advice}")
 
     out, unresolved = wrap_passthrough_calls(out, PASSTHROUGH_MAP)

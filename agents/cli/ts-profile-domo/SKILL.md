@@ -106,10 +106,24 @@ macOS), and removing the `~/.zshenv` export line.
 ---
 
 ## Guardrails
+
 - Never enter the developer token in this conversation — always via the keychain command in the
   user's own terminal.
-- `ts profiles list` and `--json` output strip credential fields; logs never print the token.
-- The token is held in memory only for the duration of a call.
+- The token is resolved lazily at call time and held in memory only.
+- **Never pass a secret through `--field`.** `ts profiles add --field` writes whatever it is
+  given straight into `~/.claude/domo-profiles.json`, which is created mode `0644`. It is for
+  non-secret metadata (`instance`) only.
+
+  `ts profiles list` strips *credential-location* fields (`token_env`, `secret_env`, …) — those
+  name an env var, not a value. It does **not** strip a literal secret stored under some other
+  key, because it cannot know one is there. So a `--field token=…` would persist in cleartext
+  and be echoed back by `ts profiles list --domo --json`. This is a limitation of the shared
+  `ts profiles` substrate, not something this skill can guard; the correct flow is Step 3, which
+  puts the token in the OS keychain and leaves only the env-var *name* in the profile.
+- The client requires `https://`, refuses redirects (a redirect target would otherwise be handed
+  the token), rejects a userinfo `@`, query, fragment or path in the instance URL, and refuses
+  loopback/link-local/private hosts. Server response bodies are never printed — only the status
+  code — because the body is chosen by whatever host the URL actually reached.
 
 ---
 

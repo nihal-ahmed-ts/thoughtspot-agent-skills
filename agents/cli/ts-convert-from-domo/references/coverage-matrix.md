@@ -20,9 +20,10 @@ Constructs. Source of truth for the formula rows is
 | Beast Mode (global) | Model formula | Migrated | deterministic subset only; window/LOD → NEEDS REVIEW |
 | Card-local `calculatedFields` | Model formula | Migrated | deduped against global Beast Modes by `(dataset, name)` |
 | Card `kpi` | Answer (KPI/headline) | Migrated | from `summaryNumber` |
+| Card `column` / `line` / `pie` / `area` / `scatter` | Answer (matching chart type) | Migrated | mapped by `_CHART_MAP`; axes are attributes→x, measures→y |
 | Card `bar` | Answer (BAR) | Migrated | from `chartBody` |
 | Card `table` | Answer (TABLE) | Migrated | from `chartBody` |
-| Page | Liveboard | Migrated | one Liveboard per page |
+| Page | Liveboard | Migrated | **only the first page** — later pages and their cards are reported `Skipped` (see Unmapped) |
 | Card layout (`preferredFullWidth`/`preferredFullHeight`) | Liveboard tile size | Approximated | grid approximation |
 
 ### Card query constructs
@@ -51,7 +52,8 @@ for the full function/aggregation table.
 |---|---|---|---|
 | Arithmetic, comparison, logical operators | same operators | Migrated | |
 | `SUM` / `AVG` / `MIN` / `MAX` / `COUNT` / `COUNT DISTINCT` | `sum` / `average` / `min` / `max` / `count` / `unique count` | Migrated | |
-| `DATEDIFF` | `diff_days` | Approximated | Domo grain argument dropped — day grain assumed; verify arg order (Domo may return b−a) |
+| `DATEDIFF(a, b)` (2-arg) | `diff_days(a, b)` | Approximated | day grain assumed; verify argument order — Domo may return b−a |
+| `DATEDIFF(grain, a, b)` (3-arg) | — | NEEDS REVIEW | the grain argument is **kept**, producing a 3-arg call to a 2-arg function, so it is flagged and comment-wrapped rather than emitted. Every `diff_days` call in the expression is checked, not just the first |
 | `STDDEV` / `VARIANCE` | `stddev` / `variance` | Approximated | verify sample vs population |
 | `CONCAT` / `LENGTH` / `SUBSTRING` / `LEFT` / `RIGHT` / `INSTR` | `concat` / `strlen` / `substr` / `left` / `right` / `strpos` | Migrated | note `substr`, **not** `substring` |
 | `UPPER` / `LOWER` / `TRIM` / `LTRIM` / `RTRIM` / `REPLACE` | `sql_string_op` pass-through | Migrated | these six do **not** exist as ThoughtSpot functions (BL-170/BL-171) — a bare call is rejected at import (error_code 14516), so they are translated to a warehouse-evaluated `sql_string_op` via the shared `formula_common.wrap_passthrough_calls` |
@@ -66,8 +68,8 @@ migration report.
 |---|---|---|
 | Card **analyzer query** (which measure/dimension/aggregation a card plots) | No Domo API a token can reach exposes it, and it is absent from the offline card JSON for some card versions | The dominant fidelity limit. Supply the dashboard PDF to read chart/axes by hand; otherwise cards degrade to title + chart-type placeholders |
 | Live (`domo-cloud`) fetch | Not wired into `parse_app` — `ts_cli/domo/client.py` is a probed foundation only (datasets, pages, card metadata, Beast Modes) | Offline bundle is the only supported input today. Tracked in `open-items.md` |
-| Card `chartType` outside `kpi` / `bar` / `table` | Not in the chart-type map | Answer emitted with the closest type and flagged |
-| `chartVersion` other than `"2.0"` | Older versions nest the query differently | Only 2.0 is parsed |
+| Card `chartType` outside the mapped set (`kpi`/`bar`/`table`/`column`/`line`/`pie`/`area`/`scatter`) | Not in `_CHART_MAP` | Answer emitted in TABLE_MODE and flagged `NEEDS REVIEW` |
+| `chartVersion` | **Not read at all** | The parser does not branch on it, so a non-2.0 card is parsed with 2.0 assumptions and whatever fails to read is flagged by the field-level notes rather than by a version check |
 | Window / running-total / LOD Beast Modes (`OVER`, `PARTITION BY`, `RANK`, `LAG`/`LEAD`) | No deterministic ThoughtSpot equivalent via string translation | Formula emitted verbatim and flagged |
 | `CASE WHEN … END` — single- **and** multi-branch | The token translator cannot faithfully restructure control flow | Emitted verbatim and flagged. Recommended rewrite (`if (c) then x else y`) is in the Beast Mode mapping reference |
 | `IFNULL` / `COALESCE` / `NULLIF` / `CAST` | Need a structural rewrite, not a token swap | Emitted verbatim and flagged; recommended rewrites in the mapping reference |

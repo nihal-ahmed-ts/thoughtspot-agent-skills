@@ -3,7 +3,7 @@
   "title": "Revenue by Region",
   "chartType": "bar",
   "chartVersion": "2.0",
-  "dataSetId": "61c4e63d-0627-41f7-b138-74968ebd7634",
+  "dataSetId": "00000006-0000-4000-8000-000000000006",
   "description": "Total revenue broken down by sales region, sorted descending",
   "calculatedFields": [
     {

@@ -4,31 +4,31 @@
     {
       "id": 1001,
       "name": "Net Revenue",
-      "owner": 587894148,
+      "owner": 900000003,
       "lastModified": 1737590400000,
       "created": 1737504000000,
       "global": true,
       "locked": false,
       "status": "VALID",
       "formula": "SUM(`Revenue`) - SUM(`Discount`)",
-      "dataSourceId": "61c4e63d-0627-41f7-b138-74968ebd7634",
+      "dataSourceId": "00000006-0000-4000-8000-000000000006",
       "links": [
         { "resource": { "type": "CARD", "id": "dr:1947052903:616023142" }, "visible": true, "active": true, "valid": "VALID" },
-        { "resource": { "type": "DATA_SOURCE", "id": "61c4e63d-0627-41f7-b138-74968ebd7634" }, "visible": false, "active": true, "valid": "VALID" }
+        { "resource": { "type": "DATA_SOURCE", "id": "00000006-0000-4000-8000-000000000006" }, "visible": false, "active": true, "valid": "VALID" }
       ],
       "archived": false
     },
     {
       "id": 1002,
       "name": "Avg Order Value",
-      "owner": 587894148,
+      "owner": 900000003,
       "lastModified": 1737590400000,
       "created": 1737504000000,
       "global": true,
       "locked": false,
       "status": "VALID",
       "formula": "SUM(`Revenue`) / COUNT(DISTINCT `Transaction ID`)",
-      "dataSourceId": "61c4e63d-0627-41f7-b138-74968ebd7634",
+      "dataSourceId": "00000006-0000-4000-8000-000000000006",
       "links": [
         { "resource": { "type": "CARD", "id": "dr:1947052903:616023143" }, "visible": true, "active": true, "valid": "VALID" }
       ],
@@ -37,14 +37,14 @@
     {
       "id": 1003,
       "name": "Discount Rate %",
-      "owner": 1893952720,
+      "owner": 900000001,
       "lastModified": 1737676800000,
       "created": 1737590400000,
       "global": false,
       "locked": false,
       "status": "VALID",
       "formula": "(SUM(`Discount`) / SUM(`Revenue`)) * 100",
-      "dataSourceId": "61c4e63d-0627-41f7-b138-74968ebd7634",
+      "dataSourceId": "00000006-0000-4000-8000-000000000006",
       "links": [
         { "resource": { "type": "CARD", "id": "dr:1947052903:616023144" }, "visible": true, "active": true, "valid": "VALID" }
       ],

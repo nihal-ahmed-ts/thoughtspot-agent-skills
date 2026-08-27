@@ -65,26 +65,42 @@ def _column_to_table(model_tml: dict) -> dict[str, str]:
 
 
 def _refs(expr: str) -> list[str]:
-    """Column references in an expression, excluding formula-to-formula refs.
+    """EVERY reference in an expression, formula refs included.
+
+    Formula-to-formula refs used to be filtered out here. That exemption is why a
+    formula on dataset B binding to dataset A's same-named sibling formula was
+    invisible to this suite by construction — the exact bug this file exists to catch.
+    A `[formula_X]` ref is returned with the prefix stripped so it resolves against
+    the formula name set.
 
     Commented-out (`/* TODO review: … */`) formulas are inert and deliberately hold
-    the untranslated original, so they are exempt.
+    the untranslated original, so those are exempt.
     """
     if expr.strip().startswith("/*"):
         return []
-    return [r for r in _REF.findall(expr) if not r.startswith("formula_")]
+    return [r[len("formula_"):] if r.startswith("formula_") else r
+            for r in _REF.findall(expr)]
 
 
 @pytest.mark.parametrize("bundle", BUNDLES, ids=["domo", "domo_edge"])
 class TestEveryReferenceResolves:
-    def test_formula_refs_resolve_to_an_exposed_column(self, bundle):
+    def test_formula_refs_resolve_to_something_the_model_exposes(self, bundle):
         app = parse_app(bundle)
         model = build_model_artifacts(app, connection_name="C", db="D", schema="S",
                                       model_name="M")["model"]["tml"]
-        exposed = _model_columns(model)
+        exposed = _model_columns(model) | {f["name"] for f in model["model"]["formulas"]}
         dangling = [(f["id"], r) for f in model["model"]["formulas"]
                     for r in _refs(f["expr"]) if r not in exposed]
-        assert not dangling, f"formula refs the Model does not expose: {dangling}"
+        assert not dangling, f"refs the Model does not expose: {dangling}"
+
+    def test_no_formula_references_itself(self, bundle):
+        """A self-reference imports and computes nothing meaningful."""
+        app = parse_app(bundle)
+        model = build_model_artifacts(app, connection_name="C", db="D", schema="S",
+                                      model_name="M")["model"]["tml"]
+        loops = [f["name"] for f in model["model"]["formulas"]
+                 if f["name"] in _refs(f["expr"])]
+        assert not loops, f"self-referential formulas: {loops}"
 
     def test_formula_refs_resolve_to_the_owning_dataset(self, bundle):
         """The actual bug: `sum([Revenue])` on dataset B binding to A's Revenue."""
@@ -104,10 +120,16 @@ class TestEveryReferenceResolves:
             owner = (entry or {}).get("dataset")
             if not owner:
                 continue
+            formula_owner = {r["name"]: r["dataset"]
+                             for r in arts["mapping"]["beast_modes"]}
             for ref in _refs(f["expr"]):
                 table = col_table.get(ref)
                 if table and table != owner:
                     wrong.append((f["id"], ref, "->", table, "expected", owner))
+                # A sibling-formula ref must also belong to the owning dataset.
+                if ref in formula_owner and formula_owner[ref] not in (None, "", owner):
+                    wrong.append((f["id"], "formula", ref, "->",
+                                  formula_owner[ref], "expected", owner))
         assert not wrong, f"formula bound to the wrong table: {wrong}"
 
     def test_answer_columns_resolve_to_the_cards_dataset(self, bundle):
@@ -117,6 +139,7 @@ class TestEveryReferenceResolves:
         col_table = _column_to_table(arts["model"]["tml"])
         exposed = _model_columns(arts["model"]["tml"])
         formula_names = {f["name"] for f in arts["mapping"]["beast_modes"]}
+        formula_owner = {f["name"]: f["dataset"] for f in arts["mapping"]["beast_modes"]}
         ds_by_id = {d.id: d.name for d in app.datasets}
 
         lb = build_liveboard_artifacts(app, model_name="M")
@@ -128,10 +151,15 @@ class TestEveryReferenceResolves:
             owner = ds_by_id.get(card.data_set_id) if card else None
             for col in ans["answer_columns"]:
                 name = col["name"]
-                if name in formula_names:      # a Model formula, not a dataset column
-                    continue
-                if name not in exposed:
+                if name not in exposed and name not in formula_names:
                     problems.append(("unexposed", ans["name"], name))
+                    continue
+                if name in formula_names:
+                    # A formula is legitimate here, but it must be one the card's own
+                    # dataset owns — this used to be skipped outright.
+                    if owner and formula_owner.get(name) not in (None, owner):
+                        problems.append(("formula from another dataset", ans["name"],
+                                         name, formula_owner.get(name), owner))
                     continue
                 table = col_table.get(name)
                 if owner and table and table != owner:

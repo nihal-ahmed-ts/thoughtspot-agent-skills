@@ -7,6 +7,10 @@ from ts_cli.commands import aggregate, alias, audit, auth, connections, databric
 
 app = typer.Typer(
     name="ts",
+    # Never render frame locals in a traceback: several commands hold credentials in
+    # scope, and `typer>=0.12,<1` permits versions that default this to True (0.12.5
+    # does). Explicit here rather than relying on the installed version's default.
+    pretty_exceptions_show_locals=False,
     help="ThoughtSpot REST API CLI.\n\nWraps common ThoughtSpot API operations used by Claude skills.",
     no_args_is_help=True,
 )

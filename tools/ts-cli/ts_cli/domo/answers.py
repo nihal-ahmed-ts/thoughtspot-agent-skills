@@ -13,7 +13,7 @@ import uuid
 from typing import Optional
 
 from .ir import Card, DomoApp
-from .naming import ColumnIndex, build_column_index
+from .naming import Index, build_index
 
 # Domo chartType -> ThoughtSpot chart.type (verified enum, thoughtspot-chart-types.md)
 _CHART_MAP = {
@@ -28,7 +28,7 @@ def _slug(s: str) -> str:
 
 
 def _ordered_columns(card: Card,
-                     index: ColumnIndex) -> tuple[list[str], list[str], list[str], list[str]]:
+                     index: Index) -> tuple[list[str], list[str], list[str], list[str]]:
     """Return (attrs, measures, ordered, unresolved) — group-by first, then measures.
 
     Names are resolved through the shared ColumnIndex, scoped to the card's own
@@ -116,7 +116,7 @@ def _apply_display_mode(answer: dict, card: Card, ctype: str, attrs: list[str],
 
 
 def _answer(card: Card, model_name: str, model_fqn: Optional[str],
-            index: ColumnIndex) -> tuple[dict, bool, str]:
+            index: Index) -> tuple[dict, bool, str]:
     attrs, measures, ordered, unresolved = _ordered_columns(card, index)
     ctype = card.chart_type.lower()
     answer = _answer_shell(card, model_name, model_fqn, ordered,
@@ -233,13 +233,23 @@ def _report_skipped_pages(app: DomoApp, card_by_urn: dict,
     later pages used to disappear with no mapping row at all, so the report could not
     mention them and still asserted "the 1 Domo page(s) map to 1 Liveboard(s)".
     """
+    # A card can appear on more than one Domo page. Only report it Skipped if it did
+    # not already make it onto the Liveboard from page 1 — otherwise it got both a
+    # Migrated and a Skipped row, told the reader to rebuild a card that is already
+    # there, and inflated cards_skipped.
+    already = {c["urn"] for c in mapping_cards}
     skipped_pages: list[dict] = []
     for extra in app.pages[1:]:
+        pending = [u for u in extra.card_ids if str(u) not in already]
         skipped_pages.append({
-            "name": extra.name, "cards": len(extra.card_ids), "status": "Skipped",
-            "note": "only the first Domo page is converted to a Liveboard — rebuild "
-                    "this page separately"})
-        for urn in extra.card_ids:
+            "name": extra.name, "cards": len(extra.card_ids),
+            "cards_not_converted": len(pending),
+            "status": "Skipped" if pending else "Migrated",
+            "note": ("only the first Domo page is converted to a Liveboard — rebuild "
+                     "this page separately" if pending else
+                     "every card on this page is already on the Liveboard from page 1")})
+        for urn in pending:
+            already.add(str(urn))
             other = card_by_urn.get(str(urn))
             mapping_cards.append({
                 "urn": str(urn),
@@ -257,7 +267,7 @@ def _report_skipped_pages(app: DomoApp, card_by_urn: dict,
 def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
                               model_fqn: Optional[str] = None,
                               report_name: Optional[str] = None) -> dict:
-    index = build_column_index(app)
+    index = build_index(app)
     page = app.pages[0] if app.pages else None
     report_name = report_name or (page.name if page else app.app_name) or "Domo Liveboard"
     order = page.card_ids if page else [c.urn for c in app.cards]

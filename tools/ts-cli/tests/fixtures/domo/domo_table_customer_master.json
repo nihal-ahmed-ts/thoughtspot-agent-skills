@@ -1,12 +1,12 @@
 {
-  "id": "8f2d0c1a-4b3e-4a0f-9c1d-2e7a6b5c9d10",
+  "id": "00000014-0000-4000-8000-000000000014",
   "name": "Customer Master",
   "description": "Synthetic reference dataset for testing dataset-to-dataset joins during Domo -> ThoughtSpot migration",
   "rows": 3400,
   "owner": {
     "id": 1893952720,
     "type": "USER",
-    "displayName": "Jae Wilson"
+    "displayName": "Fixture User 2"
   },
   "schema": {
     "columns": [

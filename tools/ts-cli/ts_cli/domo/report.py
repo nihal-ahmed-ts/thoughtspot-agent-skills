@@ -99,6 +99,8 @@ class _Stats:
     n_beast: int
     n_cards: int
     n_pages: int
+    n_pages_skipped: int
+    cards_skipped: int
     bm_m: int
     bm_r: int
     bm_a: int
@@ -118,6 +120,19 @@ class _Stats:
     nothing_parsed: bool = False
 
 
+def _page_stats(lb_mapping: Optional[dict], cards: list) -> tuple[int, int, int, list]:
+    """(pages_converted, pages_skipped, cards_skipped, page_rows).
+
+    A page's status has to be read back rather than assumed: the mapping records a
+    later page as Skipped, and the report used to hardcode "N pages -> N Liveboards".
+    """
+    pages = (lb_mapping or {}).get("pages", [])
+    converted = sum(1 for p in pages if p.get("status", "Migrated") != "Skipped")
+    skipped = sum(1 for p in pages if p.get("status") == "Skipped")
+    cards_skipped = sum(1 for c in cards if c.get("status") == "Skipped")
+    return converted, skipped, cards_skipped, pages
+
+
 def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
     src = mapping.get("source", {})
     datasets = mapping.get("datasets", [])
@@ -130,6 +145,7 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
     cd_m, cd_a, cd_r, _cd_s = _tally(cards)
     ds_m, ds_a, ds_r, _ds_s = _tally(datasets)
     approx = ds_a + jn_a + bm_a + cd_a
+    pages_converted, pages_skipped, cards_skipped, _rows = _page_stats(lb_mapping, cards)
 
     n_tables, n_joins, n_beast, n_cards = len(datasets), len(joins), len(beast), len(cards)
     total = n_tables + n_joins + n_beast + n_cards
@@ -147,12 +163,14 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
         n_tables=n_tables,
         n_cols=sum(d.get("columns", 0) for d in datasets),
         n_joins=n_joins, n_beast=n_beast, n_cards=n_cards,
-        n_pages=len((lb_mapping or {}).get("pages", [])),
+        n_pages=pages_converted,
+        n_pages_skipped=pages_skipped,
+        cards_skipped=cards_skipped,
         bm_m=bm_m, bm_r=bm_r, bm_a=bm_a, jn_r=jn_r, cd_r=cd_r, cd_a=cd_a, ds_a=ds_a,
         needs=needs, approx=approx,
         automation=_pct(ds_m + jn_m + bm_m + cd_m, total),
         complexity=complexity, effort=effort,
-        risk=_risk_level(needs, approx, chasm, n_joins),
+        risk=_risk_level(needs + pages_skipped, approx, chasm, n_joins),
         chasm=chasm,
         from_etl=any(j.get("source") == "magic_etl" for j in joins),
         join_warnings=mapping.get("join_warnings", []),
@@ -197,6 +215,9 @@ def _section_exec_summary(st: _Stats) -> list[str]:
     if st.approx:
         risk_bits.append(f"{st.approx} item(s) Approximated — mapped with a caveat, "
                          "each listed under Manual review")
+    if st.n_pages_skipped:
+        risk_bits.append(f"{st.n_pages_skipped} Domo page(s) and {st.cards_skipped} "
+                         "card(s) were not converted at all")
     if st.chasm:
         risk_bits.append(
             "multiple facts share the join key(s) "
@@ -221,20 +242,24 @@ def _section_inventory(st: _Stats) -> list[str]:
         "",
         f"- **Tables:** {st.n_tables}  |  **Columns:** {st.n_cols}",
         f"- **Relationships:** {st.n_joins}  |  **Measures (Beast Modes):** {st.n_beast}",
-        f"- **Pages:** {st.n_pages}  |  **Visuals:** {st.n_cards}",
+        (f"- **Pages:** {st.n_pages}  |  **Visuals:** {st.n_cards - st.cards_skipped}"
+         + (f"  (+{st.n_pages_skipped} page(s) / {st.cards_skipped} card(s) NOT "
+            "converted)" if st.n_pages_skipped else "")),
         "",
     ]
 
 
 def _section_modernization(st: _Stats) -> list[str]:
     n_pages = st.n_pages or 1
-    L = [
-        "## Modernization",
-        "",
-        f"**Dashboards eliminated:** none — the {n_pages} Domo page(s) map to "
-        f"{n_pages} Liveboard(s).",
-        "",
-    ]
+    line = (f"**Dashboards eliminated:** none — the {n_pages} Domo page(s) map to "
+            f"{n_pages} Liveboard(s).")
+    if st.n_pages_skipped:
+        line = (f"**Pages:** {n_pages} of {n_pages + st.n_pages_skipped} Domo page(s) "
+                f"became a Liveboard. **{st.n_pages_skipped} page(s) and "
+                f"{st.cards_skipped} card(s) were NOT converted** — only the first Domo "
+                "page is migrated; rebuild the rest by hand (each is listed under "
+                "Manual review).")
+    L = ["## Modernization", "", line, ""]
     kpi_cards = [c for c in st.cards if str(c.get("chart_type", "")).lower() == "kpi"]
     if kpi_cards:
         L += [f"**Search opportunities:** the {len(kpi_cards)} KPI card(s) "
@@ -270,7 +295,8 @@ def _section_summary_table(st: _Stats) -> list[str]:
                          ("Beast Modes → Formulas", st.beast), ("Cards → Answers", st.cards)]:
         m, a, r, s = _tally(items)
         L.append(f"| {label} | {len(items)} | {m} | {a} | {r} | {s} |")
-    L.append(f"| Pages → Liveboards | {st.n_pages} | {st.n_pages} | 0 | 0 | 0 |")
+    pm, pa, pr, ps = _tally(st.pages)
+    L.append(f"| Pages → Liveboards | {len(st.pages)} | {pm} | {pa} | {pr} | {ps} |")
     L.append("")
     return L
 
@@ -376,6 +402,9 @@ def _section_checklist(st: _Stats) -> list[str]:
         L.append("- Rebuild each flagged card and confirm it matches the source dashboard "
                  "tile — including its sort, filters and number formats, which are not "
                  "carried across.")
+    if st.n_pages_skipped:
+        L.append(f"- Rebuild the {st.n_pages_skipped} Domo page(s) that were not "
+                 f"converted ({st.cards_skipped} card(s)) as additional Liveboards.")
     L += ["- Confirm any source filters became Liveboard filters and slice every tile.", ""]
     return L
 
@@ -385,7 +414,8 @@ def _section_scorecard(st: _Stats) -> list[str]:
               - (5 if st.ds_a else 0))
     search = max(60, 90 - 5 * st.bm_r - 3 * st.bm_a)
     spotter = 85 if st.n_beast else 75
-    lb = max(50, 90 - 5 * st.cd_r - 8 * st.cd_a)
+    lb = max(20, 90 - 5 * st.cd_r - 8 * st.cd_a
+             - 15 * st.n_pages_skipped - 5 * st.cards_skipped)
     ai = 80 if st.n_beast else 70
     n_pages = st.n_pages or 1
     return [
@@ -405,6 +435,8 @@ def _section_scorecard(st: _Stats) -> list[str]:
         "Stand up Spotter on the model to replace static breakdown charts. |",
         f"| Liveboards | {lb}/100 | "
         + (f"{n_pages} page(s) → {n_pages} Liveboard(s)"
+           + (f"; {st.n_pages_skipped} page(s) not converted"
+              if st.n_pages_skipped else "")
            + ("; rebuild the flagged tile(s) to reach 100."
               if (st.cd_r or st.cd_a) else ".")) + " |",
         f"| AI Readiness | {ai}/100 | "

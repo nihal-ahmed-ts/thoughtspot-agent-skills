@@ -104,6 +104,9 @@ Confirm these before Step 0.
 ```bash
 ts domo parse <bundle-dir> --output /tmp/domo_inv.json
 ```
+`--mode` exists but only accepts `offline`; any other value is refused (see Prerequisites).
+If the user wants to *capture* a bundle with a developer token, `ts domo signin --profile <name>`
+verifies that token first and reports which endpoint families it reaches.
 Emits datasets, columns, Beast Modes, cards and page (see the IR schema), plus `notes`. Read it;
 note any `needs_review` notes — the parser flags what it could not confidently read rather than
 guessing.
@@ -135,7 +138,9 @@ what was pruned.
 ts domo build-liveboard <bundle-dir> --model-name "<Model name>" --output-dir out/ \
   [--model-fqn <model-guid>] [--report-name "<Liveboard name>"]
 ```
-Resolve `page.cardIds` → cards → Answers, assembled onto one Liveboard in page order.
+Resolve `page.cardIds` → cards → Answers, assembled onto one Liveboard in page order. The
+Answers are emitted **inside** the Liveboard TML (`visualizations[]`) — there is no separate
+Answer file in `out/`. Only the first Domo page is converted.
 `chartType` picks the viz (`kpi`→KPI, `bar`→BAR, `table`→TABLE); `groupBy`→attributes,
 aggregated `columns`→measures, `limit`→`top N`.
 

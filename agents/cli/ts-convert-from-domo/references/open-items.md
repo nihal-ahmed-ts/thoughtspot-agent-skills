@@ -103,9 +103,11 @@ fidelity pass. Mapped as Approximated today.
 
 ## #10 — Multi-tab pages are untried against a populated payload — DEFERRED
 
-`collectionIds` is empty in the fixture, so `collectionIds` / `children` → Liveboard tab
-grouping is exercised only on the single-tab path. Multi-page Domo apps, and card drill
-paths / card-to-card links, are out of scope for this release (see the coverage matrix).
+There is **no tab code at all** — `answers.py` emits `layout.tiles` and never a `tabs`
+node, so `collectionIds` / `children` are parsed and dropped. An earlier version of this
+entry described tab grouping as "exercised only on the single-tab path", which implied an
+implementation that does not exist. Card drill paths and card-to-card links are likewise
+out of scope (see the coverage matrix).
 
 ## #11 — Card sort / filters / formats are parsed but not emitted — KNOWN
 
@@ -245,11 +247,15 @@ later page, and every card on it, is now reported `Skipped` with the page named,
 the olist fixture declare `MTM` (many-to-many) and every one was emitted `MANY_TO_ONE` —
 the report then told the user to verify fan-out on a cardinality the converter invented.
 
-`relationshipType` is now honoured where ThoughtSpot can express it (`MTO`/`OTM`/`OTO`).
-A Domo **many-to-many cannot be expressed as a ThoughtSpot join at all**: it is warned
-about explicitly (measures will fan out until a bridge table exists) rather than
-flattened into MANY_TO_ONE. An unrecognised value falls back to the row-count heuristic
-and says so.
+`relationshipType` is now honoured where ThoughtSpot can express it (`MTO`/`OTM`/`OTO`),
+and it is read **before** orientation — reading it after the row-count flip inverted a
+declared `OTM` into `ONE_TO_MANY` on the fact, which is valid, importable and backwards.
+
+A Domo **many-to-many cannot be expressed as a ThoughtSpot join at all**. To be exact
+about what happens: it **is** emitted `MANY_TO_ONE` so the Model still builds, **and** it
+carries an explicit warning that measures will fan out until a bridge table exists. An
+earlier version of this entry said "warned rather than flattened"; it is both, and the
+report says so on the join's own row.
 
 ## #20 — `Approximated` never reached the summary layer — VERIFIED (fixed)
 
@@ -278,8 +284,10 @@ Approximated. The shipped fixture reports Medium / 66-100 instead of Low / 90-10
   other shared columns reports which ones were not used.
 - **`DATEDIFF` was renamed without an arity check.** `DATEDIFF('month', a, b)` became
   `diff_days('month', [End], [Start])` — a 3-arg call to a 2-arg function, graded
-  `Approximated`. Arity is now checked and the mismatch flagged. (The coverage matrix
-  also claimed the grain argument was "dropped"; it was kept. Corrected.)
+  `Approximated`. Arity is now checked — on **every** `diff_days` call in the expression,
+  not just the first, which a single `find()` missed when a valid call came first. The
+  coverage matrix now says the grain argument is **kept** and the 3-arg form is NEEDS
+  REVIEW; an earlier version of this entry claimed that row was corrected before it was.
 - **`counts["joins_dropped"]` conflated drops with advisory notes**, so a join that was
   emitted but whose direction was uncertain reported `joins: 1, joins_dropped: 1`. Drops
   and notes are now counted separately.

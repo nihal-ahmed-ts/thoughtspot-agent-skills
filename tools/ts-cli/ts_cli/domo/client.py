@@ -1,61 +1,178 @@
-"""Domo internal-API client for the `domo-cloud` (live) mode.
+"""Domo internal-API client for capturing a bundle.
 
 Authenticates to a Domo instance with a Developer Access Token (`X-DOMO-Developer-
-Token`) and reads the objects the public Developer API does NOT expose — full card
-definitions and Beast Modes — alongside datasets and pages.
+Token`) and reads the objects the public Developer API does NOT expose — card
+metadata and Beast Modes — alongside datasets and pages.
 
 IMPORTANT: these are Domo's **internal, undocumented** endpoints (the ones the Domo
-web app itself calls). They work today but are unsupported and may change; the parser
-treats every response as best-effort and flags what it cannot read. Only stdlib is
-used so the client stays dependency-free.
+web app itself calls). They work today but are unsupported and may change; every
+response is treated as best-effort and what cannot be read is flagged.
 
-The token is held in memory only — never logged or written to disk.
+Credential handling — the rules this module has to hold, and why
+---------------------------------------------------------------
+The token is a bearer credential in a *custom* header, which changes what the stdlib
+does for you. All four of these were live defects found in review:
+
+- **HTTPS is mandatory.** `if not inst.startswith("http")` accepted `http://` (it
+  starts with "http"), so the token went out in cleartext. The scheme is now
+  allowlisted, not sniffed.
+- **Redirects are not followed.** urllib's default redirect handler rebuilds every
+  header except `content-length`/`content-type` onto the new request, and whatever
+  stripping it does for `Authorization` does not apply to `X-DOMO-Developer-Token`.
+  A 302 to another origin therefore handed the token to that origin. Verified
+  against two local servers; now refused.
+- **The host is validated.** `https://acme.domo.com@example.com` connects to
+  example.com while every UI string shows acme.domo.com; a bare `169.254.169.254`
+  reaches cloud metadata; `https://evil.com/?x=` turns each path into a query
+  parameter. Userinfo, query and fragment are rejected, and the path is built with
+  `urljoin`-safe concatenation off a normalised origin.
+- **Server text never reaches the terminal.** The response body was interpolated
+  into the exception, which `ts domo signin` prints — so a host the operator was
+  tricked into naming could echo the token back into their transcript. Only the
+  status code and reason are surfaced now.
+
+The token is resolved lazily (see `_resolve_token`) and is never held in a frame that
+can raise before it is used, so it cannot be rendered into a traceback.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+# A Domo tenant is always reached over TLS. Anything else is refused rather than
+# downgraded, because the credential travels in a header on every request.
+_ALLOWED_SCHEMES = ("https",)
 
 
 class DomoError(RuntimeError):
     pass
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect.
+
+    The custom auth header would be replayed onto the redirect target, which the
+    server chooses. There is no legitimate cross-origin redirect on these endpoints,
+    so a redirect is an error rather than something to follow carefully.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        raise DomoError(
+            f"refusing to follow an HTTP {code} redirect to {newurl!r}: the Domo "
+            "developer token would be replayed onto that host. Check the instance URL.")
+
+
+def normalise_instance(instance: str) -> str:
+    """Validate a Domo instance URL and return its bare origin.
+
+    Raises DomoError with the reason, rather than silently accepting something that
+    sends the token somewhere unintended.
+    """
+    raw = (instance or "").strip()
+    if not raw:
+        raise DomoError("Domo instance is empty")
+    if "://" not in raw:
+        raw = "https://" + raw
+
+    parts = urllib.parse.urlsplit(raw)
+    if parts.scheme not in _ALLOWED_SCHEMES:
+        raise DomoError(
+            f"Domo instance must use https:// (got {parts.scheme!r}). The developer "
+            "token is sent as a request header, so plain HTTP would expose it.")
+    if "@" in parts.netloc:
+        raise DomoError(
+            "Domo instance must not contain credentials or a userinfo '@' section — "
+            f"{raw!r} would connect to {parts.hostname!r}, not to the host shown "
+            "before the '@'.")
+    if parts.query or parts.fragment:
+        raise DomoError(
+            "Domo instance must be a bare host, with no query string or fragment "
+            f"(got {raw!r}) — otherwise every API path becomes a query parameter.")
+    if (parts.path or "").strip("/"):
+        raise DomoError(
+            f"Domo instance must be a bare host, with no path (got {raw!r}).")
+    if not parts.hostname:
+        raise DomoError(f"Domo instance has no host: {raw!r}")
+    _reject_internal_host(parts.hostname)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _reject_internal_host(host: str) -> None:
+    """Refuse loopback / link-local / private literals.
+
+    A Domo tenant is SaaS and never on one of these, but `169.254.169.254` is the
+    cloud metadata service and the rest are the usual SSRF pivots. Requiring HTTPS
+    already blocks the plain-HTTP metadata endpoint; this closes the class rather
+    than that one instance. There is deliberately no override flag.
+    """
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return                     # a DNS name — nothing to classify here
+    if (ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved
+            or ip.is_multicast or ip.is_unspecified):
+        raise DomoError(
+            f"Domo instance must be a public tenant host (got {host!r}, which is a "
+            "loopback/link-local/private address). A Domo tenant looks like "
+            "https://<tenant>.domo.com.")
+
+
 class DomoClient:
-    def __init__(self, instance: str, token: str, timeout: int = 30) -> None:
-        # instance like "https://acme.domo.com" (scheme optional)
-        inst = instance.strip().rstrip("/")
-        if not inst.startswith("http"):
-            inst = "https://" + inst
-        self.base = inst
+    def __init__(self, instance: str, token: Optional[str] = None,
+                 timeout: int = 30, *,
+                 token_provider: Optional[Callable[[], str]] = None) -> None:
+        """`instance` is validated up front; the token is resolved lazily.
+
+        Pass `token_provider` to defer resolution entirely (the profile path does),
+        so the raw secret is never a local in a frame that could raise.
+        """
+        self.base = normalise_instance(instance)
         self._token = token
+        self._token_provider = token_provider
         self.timeout = timeout
+        self._opener = urllib.request.build_opener(_NoRedirect)
 
     # -- low-level ---------------------------------------------------------
     def _headers(self) -> dict:
+        token = self._token if self._token is not None else (
+            self._token_provider() if self._token_provider else "")
         return {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "X-DOMO-Developer-Token": self._token,
+            "X-DOMO-Developer-Token": token,
         }
+
+    def _url(self, path: str) -> str:
+        """Join `path` onto the validated origin without letting it change host."""
+        if not path.startswith("/"):
+            path = "/" + path
+        return self.base + path
 
     def _request(self, path: str, method: str = "GET",
                  body: Optional[Any] = None) -> Any:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
-            self.base + path, data=data, headers=self._headers(), method=method)
+            self._url(path), data=data, headers=self._headers(), method=method)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with self._opener.open(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode()
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as e:
-            detail = e.read().decode()[:200]
-            raise DomoError(f"{method} {path} -> HTTP {e.code}: {detail}") from None
+            # Status + reason only. The response BODY is attacker-controlled and
+            # `ts domo signin` prints DomoError text to the operator's terminal.
+            reason = str(getattr(e, "reason", "") or "")[:80]
+            raise DomoError(f"{method} {path} -> HTTP {e.code} {reason}".rstrip()) from None
+        except DomoError:
+            raise
         except urllib.error.URLError as e:
-            raise DomoError(f"{method} {path} -> {e}") from None
+            raise DomoError(f"{method} {path} -> {type(e).__name__}") from None
+        except json.JSONDecodeError:
+            raise DomoError(f"{method} {path} -> response was not JSON") from None
 
     def _get(self, path: str) -> Any:
         return self._request(path, "GET")
@@ -184,6 +301,24 @@ def _resolve_token(profile: dict) -> str:
     )
 
 
+def _credential_present(profile: dict) -> bool:
+    """Is a token obtainable for this profile? Returns a bool, never the value.
+
+    Lets `client_from_profile` fail fast on a missing credential without binding the
+    secret to a name, so the lazy-resolution guarantee still holds.
+    """
+    env_var = profile.get("token_env", "")
+    if env_var and os.environ.get(env_var):
+        return True
+    from ts_cli.profile_ops import derive_keychain_service, slugify
+    service = derive_keychain_service("domo", slugify(profile["name"]))
+    try:
+        import keyring
+        return keyring.get_password(service, "developer-token") is not None
+    except Exception:  # noqa: BLE001 — keyring is optional and may fail on any backend
+        return False
+
+
 def client_from_profile(profile_name: Optional[str] = None,
                         timeout: int = 30) -> DomoClient:
     """Build a DomoClient from a configured profile (see /ts-profile-domo)."""
@@ -194,4 +329,13 @@ def client_from_profile(profile_name: Optional[str] = None,
             f"Domo profile {profile['name']!r} has no 'instance' field.\n"
             "Re-add it with: ts profiles add --platform domo --field instance=https://<tenant>.domo.com ..."
         )
-    return DomoClient(instance, _resolve_token(profile), timeout=timeout)
+    # Fail fast on a missing credential, but WITHOUT binding it: _credential_present
+    # returns a bool. Resolution itself stays deferred, because passing the secret
+    # positionally would make it a local in a frame that raises if `instance` is bad,
+    # and typer<1 permits versions whose traceback panels render locals.
+    if not _credential_present(profile):
+        raise SystemExit(
+            f"No credential found for Domo profile {profile['name']!r}.\n"
+            "Run /ts-profile-domo to configure credentials.")
+    return DomoClient(instance, token_provider=lambda: _resolve_token(profile),
+                      timeout=timeout)
