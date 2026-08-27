@@ -11,7 +11,10 @@ on:
     - cron: "0 6 * * 1"
 
 jobs:
-  validate:
+  # The full validator/linter/test suite on the primary interpreter. NOT the required
+  # status check — `validate` at the bottom of this file is, and it aggregates this job
+  # with `pytest-matrix`. See that job for why.
+  suite:
     # Full validator/test suite only makes sense on a code change — skip it on the weekly
     # cron (the scheduled run does the pip-audit-only job below instead).
     if: github.event_name != 'schedule'
@@ -176,6 +179,13 @@ jobs:
           pytest agents/cli/ts-object-model-erd/tests/ -q
           pytest agents/databricks/tests/ -q
 
+      - name: Check the CI gate covers every job
+        # The aggregate `validate` job is only a gate if every non-schedule job is in its
+        # `needs:`. Nothing else in the repo reads job names, so without this a new job
+        # silently reproduces audit finding 7.1.
+        run: |
+          python3 tools/validate/check_ci_gate_coverage.py --root .
+
       - name: Run credential-free smoke suites
         # These five assert real behaviour of publish_plan / csr_plan / apply_plan /
         # alias and need NO credentials, but ran in no CI job at all: the pytest steps
@@ -192,10 +202,10 @@ jobs:
             python3 "tools/smoke-tests/$s.py"
           done
 
-  # Cross-version pytest matrix. The `validate` job above runs the full suite on 3.12; this
+  # Cross-version pytest matrix. The `suite` job above runs the full suite on 3.12; this
   # job re-runs ONLY the unit/validator tests on the rest of the declared support range
   # (pyproject `requires-python = ">=3.10,<3.15"`). Validators/linters stay single-version in
-  # `validate` — this matrix exists purely to catch interpreter-specific test breakage
+  # `suite` — this matrix exists purely to catch interpreter-specific test breakage
   # (audit finding 16.4 → BL-107; 3.14 entry also verifies the lifted cap → BL-106).
   pytest-matrix:
     if: github.event_name != 'schedule'
@@ -205,7 +215,7 @@ jobs:
       # interpreter-specific break is visible in isolation.
       fail-fast: false
       matrix:
-        # 3.12 is covered by `validate`; this fills in the rest of requires-python.
+        # 3.12 is covered by `suite`; this fills in the rest of requires-python.
         python-version: ["3.10", "3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -220,15 +230,51 @@ jobs:
           pip install -e tools/ts-cli
 
       - name: Run unit + validator tests
-        # Same three invocations as `validate` (see that job for why they're split).
+        # Same three invocations as `suite` (see that job for why they're split).
         run: |
           pytest tools/ts-cli/tests/ tools/validate/tests/ -q
           pytest agents/cli/ts-object-model-erd/tests/ -q
           pytest agents/databricks/tests/ -q
 
+  # THE REQUIRED STATUS CHECK. Branch protection requires exactly one context on `main`,
+  # and before this job that context was the single-interpreter suite — so a red
+  # `pytest-matrix (3.10)` reported a failure that could not block a merge (audit finding
+  # 7.1: "the gate exists but is advisory"). Folding the matrix in here means the existing
+  # requirement covers it, with no branch-protection change and no version numbers baked
+  # into a settings page that would silently reopen the hole on the next support-range bump.
+  #
+  # `contains(needs.*.result, ...)` rather than naming each job: it covers any job added to
+  # `needs:` later, which is the whole failure mode being fixed. (It is NOT because a
+  # hyphenated name needs escaping — `needs.pytest-matrix.result` is perfectly valid; dot
+  # dereference allows `-`, as line 218's `matrix.python-version` demonstrates. An earlier
+  # version of this comment claimed otherwise. The trade-off is real though: the wildcard
+  # form over `needs` is undocumented, while the dot form is documented.)
+  #
+  # `always()` is required, or a FAILED dependency skips this job — and a skipped required
+  # check does not turn the merge button red, which would reproduce the very bug this job
+  # fixes, one level up. **Do not "correct" this to `!cancelled()`**: GitHub's docs prefer
+  # `!cancelled()` generically, but here a cancelled run would skip the job and a skipped
+  # required check counts as satisfied. `always()` is deliberate.
+  validate:
+    if: always() && github.event_name != 'schedule'
+    needs: [suite, pytest-matrix]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every gate job to have succeeded
+        # 'skipped' is a failure here too: on a pull_request neither dependency is skipped,
+        # so a skip means someone added a condition that quietly removed a gate.
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: |
+          echo "suite=${{ needs.suite.result }} pytest-matrix=${{ needs['pytest-matrix'].result }}"
+          echo "::error::A required gate job did not succeed — see the jobs above."
+          exit 1
+
+      - name: All gates green
+        run: echo "suite and pytest-matrix both succeeded."
+
   # Weekly scheduled CVE sweep — pip-audit ONLY (no validators/tests). Keeps the existing
   # CVE gate time-driven as well as event-driven without re-running the whole suite on cron
-  # (audit finding 16.3). The push/PR pip-audit step inside `validate` is unchanged.
+  # (audit finding 16.3). The push/PR pip-audit step inside `suite` is unchanged.
   scheduled-audit:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
