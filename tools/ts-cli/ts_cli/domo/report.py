@@ -65,7 +65,8 @@ def _complexity_effort(n_tables: int, n_joins: int) -> tuple[str, str]:
 
 
 def _risk_level(needs: int, approx: int, chasm: list, n_joins: int,
-                dropped: int = 0, findings: int = 0) -> str:
+                dropped: int = 0, findings: int = 0, unread: int = 0,
+                ambiguous: int = 0) -> str:
     """Risk must account for EVERY class the report can flag, not one of them.
 
     The first version keyed only off NEEDS REVIEW, so a conversion where every card
@@ -74,9 +75,11 @@ def _risk_level(needs: int, approx: int, chasm: list, n_joins: int,
     "Automation 100% · Risk Low". `dropped` (joins not emitted) and `findings`
     (TML-invariant + aggregation changes) close the remaining inputs.
     """
-    if not (needs or approx or dropped or findings or chasm):
+    if not (needs or approx or dropped or findings or chasm or unread or ambiguous):
         return "Low"
-    if chasm or needs or dropped or n_joins >= 5:
+    # An unread source file means data is MISSING, not approximated — that outranks
+    # everything else, because the report cannot describe what it never parsed.
+    if unread or chasm or needs or dropped or n_joins >= 5:
         return "Medium"
     return "Low–Medium"
 
@@ -122,6 +125,10 @@ class _Stats:
     from_etl: bool = False
     join_warnings: list = field(default_factory=list)
     join_drops: list = field(default_factory=list)
+    table_renames: list = field(default_factory=list)
+    formula_renames: list = field(default_factory=list)
+    ambiguities: list = field(default_factory=list)
+    parse_notes: list = field(default_factory=list)
     n_dropped: int = 0
     nothing_parsed: bool = False
 
@@ -139,6 +146,24 @@ def _page_stats(lb_mapping: Optional[dict], cards: list) -> tuple[int, int, int,
     return converted, skipped, cards_skipped, pages
 
 
+def _tallies(datasets: list, joins: list, beast: list,
+             cards: list) -> tuple[dict, int, int]:
+    """Per-class status tallies plus the NEEDS-REVIEW and Approximated totals."""
+    bm_m, bm_a, bm_r, _s1 = _tally(beast)
+    jn_m, jn_a, jn_r, _s2 = _tally(joins)
+    cd_m, cd_a, cd_r, _s3 = _tally(cards)
+    ds_m, ds_a, ds_r, _s4 = _tally(datasets)
+    t = {"bm_m": bm_m, "bm_a": bm_a, "bm_r": bm_r, "jn_r": jn_r,
+         "cd_r": cd_r, "cd_a": cd_a, "ds_a": ds_a,
+         "migrated": ds_m + jn_m + bm_m + cd_m}
+    return t, ds_r + jn_r + bm_r + cd_r, ds_a + jn_a + bm_a + cd_a
+
+
+def _merged(mapping: dict, lb_mapping: Optional[dict], key: str) -> list:
+    """A list present in either mapping — both stages record notes and ambiguities."""
+    return list(mapping.get(key) or []) + list((lb_mapping or {}).get(key) or [])
+
+
 def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
     src = mapping.get("source", {})
     datasets = mapping.get("datasets", [])
@@ -146,22 +171,23 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
     beast = mapping.get("beast_modes", [])
     cards = (lb_mapping or {}).get("cards", [])
 
-    bm_m, bm_a, bm_r, _bm_s = _tally(beast)
-    jn_m, jn_a, jn_r, _jn_s = _tally(joins)
-    cd_m, cd_a, cd_r, _cd_s = _tally(cards)
-    ds_m, ds_a, ds_r, _ds_s = _tally(datasets)
-    approx = ds_a + jn_a + bm_a + cd_a
-    invariants = mapping.get("invariant_findings", []) or []
-    agg_changes = mapping.get("aggregation_changes", []) or []
+    t, needs_total, approx = _tallies(datasets, joins, beast, cards)
+    bm_m, bm_a, bm_r = t["bm_m"], t["bm_a"], t["bm_r"]
+    jn_r, cd_r, cd_a, ds_a = t["jn_r"], t["cd_r"], t["cd_a"], t["ds_a"]
+    invariants = list(mapping.get("invariant_findings") or [])
+    agg_changes = list(mapping.get("aggregation_changes") or [])
+    drops = list(mapping.get("join_drops") or [])
+    ambiguities = _merged(mapping, lb_mapping, "name_ambiguities")
+    parse_notes = _merged(mapping, lb_mapping, "parse_notes")
     pages_converted, pages_skipped, cards_skipped, _rows = _page_stats(lb_mapping, cards)
 
     n_tables, n_joins, n_beast, n_cards = len(datasets), len(joins), len(beast), len(cards)
     # Dropped joins and aggregation changes are work the user still has to do, so they
     # belong in the denominator. Leaving them out reported "Automation 100%" for a
     # bundle where 7 relationships were never emitted.
-    n_dropped = len(mapping.get("join_drops") or [])
+    n_dropped = len(drops)
     total = n_tables + n_joins + n_beast + n_cards + n_dropped
-    needs = ds_r + jn_r + bm_r + cd_r
+    needs = needs_total
     chasm = _chasm_keys(joins)
     complexity, effort = _complexity_effort(n_tables, n_joins)
 
@@ -170,7 +196,7 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
         mode=src.get("mode", "offline"),
         datasets=datasets, joins=joins, beast=beast,
         renamed=mapping.get("renamed_columns", []),
-        invariants=mapping.get("invariant_findings", []),
+        invariants=invariants,
         agg_changes=agg_changes,
         cards=cards, pages=(lb_mapping or {}).get("pages", []),
         n_tables=n_tables,
@@ -181,16 +207,21 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
         cards_skipped=cards_skipped,
         bm_m=bm_m, bm_r=bm_r, bm_a=bm_a, jn_r=jn_r, cd_r=cd_r, cd_a=cd_a, ds_a=ds_a,
         needs=needs, approx=approx,
-        automation=_pct(ds_m + jn_m + bm_m + cd_m, total),
+        automation=_pct(t["migrated"], total),
         n_dropped=n_dropped,
         complexity=complexity, effort=effort,
         risk=_risk_level(needs + pages_skipped, approx, chasm, n_joins,
-                         dropped=len(mapping.get("join_drops") or []),
-                         findings=len(invariants) + len(agg_changes)),
+                         dropped=n_dropped,
+                         findings=len(invariants) + len(agg_changes),
+                         unread=len(parse_notes), ambiguous=len(ambiguities)),
         chasm=chasm,
         from_etl=any(j.get("source") == "magic_etl" for j in joins),
-        join_warnings=mapping.get("join_warnings", []),
-        join_drops=mapping.get("join_drops", []),
+        join_warnings=list(mapping.get("join_warnings") or []),
+        join_drops=drops,
+        table_renames=list(mapping.get("table_renames") or []),
+        formula_renames=list(mapping.get("formula_renames") or []),
+        ambiguities=ambiguities,
+        parse_notes=parse_notes,
         nothing_parsed=not (datasets or joins or beast or cards),
     )
 
@@ -241,6 +272,12 @@ def _section_exec_summary(st: _Stats) -> list[str]:
     if st.agg_changes:
         risk_bits.append(f"{len(st.agg_changes)} measure(s) had their aggregation "
                          "changed from SUM, which changes every number")
+    if st.parse_notes:
+        risk_bits.insert(0, f"**{len(st.parse_notes)} source file(s) could not be read "
+                            "in full — this conversion is incomplete**")
+    if st.ambiguities:
+        risk_bits.append(f"{len(st.ambiguities)} name(s) are ambiguous between a column "
+                         "and a Beast Mode")
     if st.chasm:
         risk_bits.append(
             "multiple facts share the join key(s) "
@@ -371,21 +408,46 @@ def _section_cards(st: _Stats) -> list[str]:
             L += [f"Assembled onto Liveboard **{st.pages[0].get('name')}** "
                   f"({st.pages[0].get('cards')} tiles).", ""]
 
-    if st.renamed:
-        L += ["### Renamed columns (display-name collisions)", ""]
+    if st.renamed or st.table_renames or st.formula_renames:
+        L += ["### Renamed to keep Model names unique", "",
+              "A ThoughtSpot Model exposes one flat namespace, so a name used twice in "
+              "Domo has to be disambiguated. The physical column is unchanged — only "
+              "the display name.", ""]
+        for rc in st.table_renames:
+            L.append(f"- **Dataset** `{rc.get('from')}` → `{rc.get('to')}`")
         for rc in st.renamed:
-            L.append(f"- `{rc.get('from')}` → `{rc.get('to')}` (table {rc.get('table')})")
+            reason = rc.get("reason")
+            L.append(f"- **Column** `{rc.get('from')}` → `{rc.get('to')}` "
+                     f"(table {rc.get('table')})"
+                     + (f" — {reason}" if reason else ""))
+        for rc in st.formula_renames:
+            L.append(f"- **Beast Mode** `{rc.get('from')}` → `{rc.get('to')}` "
+                     f"(dataset {rc.get('dataset')}) — {rc.get('reason', '')}")
         L.append("")
     return L
 
 
-def _review_rows(st: _Stats) -> list[str]:
+def _source_review_rows(st: _Stats) -> list[str]:
+    """Rows that mean data is MISSING or a name is ambiguous — read these first."""
+    rows: list[str] = []
+    for n in st.parse_notes:
+        msg = n.get("message") if isinstance(n, dict) else str(n)
+        rows.append(f"- **Source not fully read** — {msg}. Anything in that file is "
+                    "missing from this conversion.")
+    for a in st.ambiguities:
+        rows.append(f"- **Ambiguous name** — {a}")
+    return rows
+
+
+def _object_review_rows(st: _Stats) -> list[str]:
+    """Rows for individual objects the converter flagged."""
     rows: list[str] = []
     for j in st.joins:
         if j.get("status") in _REVIEW:
             rows.append(
                 f"- **Join** {j.get('left')} ↔ {j.get('right')} on `{j.get('on')}` "
-                f"({j.get('status')}) — {j.get('note', '')}. Confirm MANY_TO_ONE from the fact.")
+                f"({j.get('status')}) — {j.get('note', '')}. Confirm MANY_TO_ONE from "
+                "the fact.")
     if st.chasm:
         rows.append(
             "- **Chasm-trap risk** — multiple facts share "
@@ -403,6 +465,12 @@ def _review_rows(st: _Stats) -> list[str]:
             rows.append(
                 f"- **Card** `{c.get('title', c.get('urn'))}` ({c.get('chart_type')}, "
                 f"{c.get('status')}) — {c.get('note') or 'rebuild in ThoughtSpot'}")
+    return rows
+
+
+def _review_rows(st: _Stats) -> list[str]:
+    """Manual-review rows, ordered by how much they cost the reader to miss."""
+    rows = _source_review_rows(st) + _object_review_rows(st)
     for w in st.join_warnings:
         rows.append(f"- **Join not emitted / ambiguous** — {w}")
     for a in st.agg_changes:

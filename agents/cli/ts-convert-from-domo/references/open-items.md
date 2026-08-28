@@ -437,3 +437,32 @@ singular/plural disagreed (`bid` False, `bids` True). `urn` now matches only as 
 separated token, and a glued suffix requires two characters of stem — which is also what
 makes the plural consistent.
 
+## #29 — Final self-audit before merge — VERIFIED (fixed)
+
+Swept the repo rather than the diff, and found four more things. Recording them because
+three are the same *shape* as findings the reviewer raised, which is the useful signal.
+
+- **Four CI validators had never been run locally.** My sweep script was a hand-kept
+  parallel list, so `check_ci_gate_coverage`, `check_harness_routing`,
+  `check_audit_workflow_permissions` and `check_mapping_code_sync` were invisible to it —
+  and so was the `suggest_dependency_types --base` PR gate. The sweep now *extracts* the
+  command lines from `.github/workflows/validate.yml`, so a gate added upstream cannot
+  be missed again. All 38 pass, plus all four PR-scoped gates.
+- **Five mapping keys were stored and never shown** — `table_renames`,
+  `formula_renames`, `name_ambiguities`, `parse_notes`, `join_advisories`. Exactly the
+  "recorded in the mapping, contradicted by the report" pattern from #27, one layer
+  further out. Renames now have their own report section, and unread sources plus
+  ambiguous names lead Manual review.
+- **An unread source file still reported "Risk: Low — clean conversion".** A parse note
+  means data is *missing*, which outranks every other class, so it now dominates the
+  risk score and the headline says the conversion is incomplete.
+- **`Index.derived` was read only by a test**, duplicating a local that recorded the same
+  fact. The field is now the single source and the local is gone.
+
+`tests/test_domo_pipeline.py` was added because every earlier test drove the two build
+stages in-process, which cannot catch a cross-stage drift — the thing that actually went
+wrong four times. It runs the real CLI and asserts that every column an Answer names
+exists in the Model written beside it on the right table, that the index was loaded
+rather than re-derived, that both stages agree on the bundle digest, that a second run
+is byte-identical, and that `ts tml lint` passes on the output.
+

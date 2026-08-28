@@ -309,9 +309,11 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
     re-deriving the same rule and hoping. When it is omitted the index is re-derived
     (deterministically) and `mapping["index_rederived"]` is set so the caller can warn.
     """
-    rederived = index is None
     if index is None:
         index = build_index(app)
+    # `Index.derived` is the single source of this fact: True when the namespace was
+    # computed here, False when it was loaded from a previous stage's mapping. Keeping a
+    # separate local alongside it would be two records of one thing.
     page = app.pages[0] if app.pages else None
     report_name = report_name or (page.name if page else app.app_name) or "Domo Liveboard"
     order = page.card_ids if page else [c.urn for c in app.cards]
@@ -330,7 +332,7 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
     mapping = {
         "pages": ([{"name": report_name, "cards": len(vizzes)}] + skipped_pages),
         "cards": mapping_cards,
-        "index_rederived": rederived,
+        "index_rederived": index.derived,
         "bundle_digest": index.bundle_digest or bundle_digest(app),
         "name_ambiguities": list(index.ambiguities),
         "parse_notes": note_rows(app),

@@ -9,7 +9,7 @@
 - **Migration complexity:** Low–Medium
 - **Automation %:** 56%  |  **Manual %:** 44%
 - **Estimated effort:** ~0.5–1 engineer-day
-- **Risk score:** Medium — 1 item(s) flagged NEEDS REVIEW; 3 item(s) Approximated — mapped with a caveat, each listed under Manual review.
+- **Risk score:** Medium — **2 source file(s) could not be read in full — this conversion is incomplete**; 1 item(s) flagged NEEDS REVIEW; 3 item(s) Approximated — mapped with a caveat, each listed under Manual review.
 
 ## Inventory
 
@@ -73,12 +73,16 @@
 
 Assembled onto Liveboard **Sales Overview** (3 tiles).
 
-### Renamed columns (display-name collisions)
+### Renamed to keep Model names unique
 
-- `Customer ID` → `Customer ID (Customer Master)` (table Customer Master)
+A ThoughtSpot Model exposes one flat namespace, so a name used twice in Domo has to be disambiguated. The physical column is unchanged — only the display name.
+
+- **Column** `Customer ID` → `Customer ID (Customer Master)` (table Customer Master) — the name is already taken in the Model
 
 ## Manual review (do these in ThoughtSpot)
 
+- **Source not fully read** — unrecognized object in magic_etl_olist.json. Anything in that file is missing from this conversion.
+- **Source not fully read** — unrecognized object in magic_etl_olist.json. Anything in that file is missing from this conversion.
 - **Join** Sample Sales Transactions ↔ Customer Master on `Customer ID` (NEEDS REVIEW) — inferred by shared column name. Confirm MANY_TO_ONE from the fact.
 - **Card** `Net Revenue` (kpi, Approximated) — not carried onto the Answer — rebuild by hand: card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Region); conditional formatting (1 rule(s))
 - **Card** `Revenue by Region` (bar, Approximated) — not carried onto the Answer — rebuild by hand: sort (Total Revenue DESCENDING — Domo alias); card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Product Category)
