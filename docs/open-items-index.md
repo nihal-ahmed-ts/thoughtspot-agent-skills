@@ -5,7 +5,7 @@ Re-run to refresh: `python3 tools/validate/generate_open_items_index.py`
 
 ## Summary
 
-**167 total items** across 19 skills — **70 open**, 82 verified, 15 deferred
+**173 total items** across 19 skills — **70 open**, 88 verified, 15 deferred
 
 | Skill | Total | Open | Verified | Deferred |
 |---|---|---|---|---|
@@ -18,7 +18,7 @@ Re-run to refresh: `python3 tools/validate/generate_open_items_index.py`
 | ts-convert-from-qlik | 6 | **5** | 0 | 1 |
 | ts-convert-from-snowflake-sv | 4 | **4** | 0 | 0 |
 | ts-object-answer-promote | 4 | **4** | 0 | 0 |
-| ts-convert-from-domo | 22 | **3** | 14 | 5 |
+| ts-convert-from-domo | 28 | **3** | 20 | 5 |
 | ts-load-source-data | 3 | **3** | 0 | 0 |
 | ts-publish-orgs | 8 | **3** | 4 | 1 |
 | ts-convert-from-sisense | 5 | **2** | 2 | 1 |

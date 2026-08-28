@@ -64,16 +64,19 @@ def _complexity_effort(n_tables: int, n_joins: int) -> tuple[str, str]:
     return "Medium–High", "~1–2 engineer-days"
 
 
-def _risk_level(needs: int, approx: int, chasm: list, n_joins: int) -> str:
-    """Risk must account for Approximated, not only NEEDS REVIEW.
+def _risk_level(needs: int, approx: int, chasm: list, n_joins: int,
+                dropped: int = 0, findings: int = 0) -> str:
+    """Risk must account for EVERY class the report can flag, not one of them.
 
-    Keying only off `needs` meant a conversion where every card lost its filters and
-    sort still reported "Low — clean conversion — no structural gaps", i.e. the summary
-    layer re-asserting exactly what the per-card flagging was added to prevent.
+    The first version keyed only off NEEDS REVIEW, so a conversion where every card
+    lost its filters reported "Low — clean conversion". That was fixed for
+    `Approximated` and not generalised, so a bundle that dropped 7 joins still reported
+    "Automation 100% · Risk Low". `dropped` (joins not emitted) and `findings`
+    (TML-invariant + aggregation changes) close the remaining inputs.
     """
-    if needs == 0 and approx == 0 and not chasm:
+    if not (needs or approx or dropped or findings or chasm):
         return "Low"
-    if chasm or n_joins >= 5 or needs:
+    if chasm or needs or dropped or n_joins >= 5:
         return "Medium"
     return "Low–Medium"
 
@@ -91,6 +94,7 @@ class _Stats:
     beast: list
     renamed: list
     invariants: list
+    agg_changes: list
     cards: list
     pages: list
     n_tables: int
@@ -117,6 +121,8 @@ class _Stats:
     chasm: list = field(default_factory=list)
     from_etl: bool = False
     join_warnings: list = field(default_factory=list)
+    join_drops: list = field(default_factory=list)
+    n_dropped: int = 0
     nothing_parsed: bool = False
 
 
@@ -145,10 +151,16 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
     cd_m, cd_a, cd_r, _cd_s = _tally(cards)
     ds_m, ds_a, ds_r, _ds_s = _tally(datasets)
     approx = ds_a + jn_a + bm_a + cd_a
+    invariants = mapping.get("invariant_findings", []) or []
+    agg_changes = mapping.get("aggregation_changes", []) or []
     pages_converted, pages_skipped, cards_skipped, _rows = _page_stats(lb_mapping, cards)
 
     n_tables, n_joins, n_beast, n_cards = len(datasets), len(joins), len(beast), len(cards)
-    total = n_tables + n_joins + n_beast + n_cards
+    # Dropped joins and aggregation changes are work the user still has to do, so they
+    # belong in the denominator. Leaving them out reported "Automation 100%" for a
+    # bundle where 7 relationships were never emitted.
+    n_dropped = len(mapping.get("join_drops") or [])
+    total = n_tables + n_joins + n_beast + n_cards + n_dropped
     needs = ds_r + jn_r + bm_r + cd_r
     chasm = _chasm_keys(joins)
     complexity, effort = _complexity_effort(n_tables, n_joins)
@@ -159,6 +171,7 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
         datasets=datasets, joins=joins, beast=beast,
         renamed=mapping.get("renamed_columns", []),
         invariants=mapping.get("invariant_findings", []),
+        agg_changes=agg_changes,
         cards=cards, pages=(lb_mapping or {}).get("pages", []),
         n_tables=n_tables,
         n_cols=sum(d.get("columns", 0) for d in datasets),
@@ -169,11 +182,15 @@ def _compute_stats(mapping: dict, lb_mapping: Optional[dict]) -> _Stats:
         bm_m=bm_m, bm_r=bm_r, bm_a=bm_a, jn_r=jn_r, cd_r=cd_r, cd_a=cd_a, ds_a=ds_a,
         needs=needs, approx=approx,
         automation=_pct(ds_m + jn_m + bm_m + cd_m, total),
+        n_dropped=n_dropped,
         complexity=complexity, effort=effort,
-        risk=_risk_level(needs + pages_skipped, approx, chasm, n_joins),
+        risk=_risk_level(needs + pages_skipped, approx, chasm, n_joins,
+                         dropped=len(mapping.get("join_drops") or []),
+                         findings=len(invariants) + len(agg_changes)),
         chasm=chasm,
         from_etl=any(j.get("source") == "magic_etl" for j in joins),
         join_warnings=mapping.get("join_warnings", []),
+        join_drops=mapping.get("join_drops", []),
         nothing_parsed=not (datasets or joins or beast or cards),
     )
 
@@ -218,6 +235,12 @@ def _section_exec_summary(st: _Stats) -> list[str]:
     if st.n_pages_skipped:
         risk_bits.append(f"{st.n_pages_skipped} Domo page(s) and {st.cards_skipped} "
                          "card(s) were not converted at all")
+    if st.join_drops:
+        risk_bits.append(f"{len(st.join_drops)} relationship(s) could not be emitted "
+                         "as a join")
+    if st.agg_changes:
+        risk_bits.append(f"{len(st.agg_changes)} measure(s) had their aggregation "
+                         "changed from SUM, which changes every number")
     if st.chasm:
         risk_bits.append(
             "multiple facts share the join key(s) "
@@ -250,9 +273,16 @@ def _section_inventory(st: _Stats) -> list[str]:
 
 
 def _section_modernization(st: _Stats) -> list[str]:
-    n_pages = st.n_pages or 1
-    line = (f"**Dashboards eliminated:** none — the {n_pages} Domo page(s) map to "
-            f"{n_pages} Liveboard(s).")
+    n_pages = st.n_pages
+    if not n_pages:
+        # `or 1` invented a page: running `report` after build-model only produced
+        # "Pages → Liveboards | 0 |" in the table and "the 1 Domo page(s) map to 1
+        # Liveboard(s)" in the prose of the same document.
+        line = ("**Dashboards eliminated:** no Liveboard was built — run "
+                "`ts domo build-liveboard` for the card/page half of the conversion.")
+    else:
+        line = (f"**Dashboards eliminated:** none — the {n_pages} Domo page(s) map to "
+                f"{n_pages} Liveboard(s).")
     if st.n_pages_skipped:
         line = (f"**Pages:** {n_pages} of {n_pages + st.n_pages_skipped} Domo page(s) "
                 f"became a Liveboard. **{st.n_pages_skipped} page(s) and "
@@ -375,6 +405,8 @@ def _review_rows(st: _Stats) -> list[str]:
                 f"{c.get('status')}) — {c.get('note') or 'rebuild in ThoughtSpot'}")
     for w in st.join_warnings:
         rows.append(f"- **Join not emitted / ambiguous** — {w}")
+    for a in st.agg_changes:
+        rows.append(f"- **Aggregation changed** — `{a['column']}` {a['note']}")
     for m in st.invariants:
         rows.append(f"- **TML invariant** — {m}")
     return rows
@@ -417,7 +449,7 @@ def _section_scorecard(st: _Stats) -> list[str]:
     lb = max(20, 90 - 5 * st.cd_r - 8 * st.cd_a
              - 15 * st.n_pages_skipped - 5 * st.cards_skipped)
     ai = 80 if st.n_beast else 70
-    n_pages = st.n_pages or 1
+    n_pages = st.n_pages
     return [
         "## ThoughtSpot Modernization Scorecard",
         "",

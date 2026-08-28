@@ -319,3 +319,121 @@ review pass:
 - The committed `migration-report.example.md` had gone stale against that note. Docs that
   are generated are now regenerated as part of the change, not after it.
 
+## #23 — The namespace is now owned end-to-end — VERIFIED (fixed)
+
+Round 3 claimed `naming.Index` owned the whole flat Model namespace. It did not, and
+three more paths into the same wrong-numbers class survived. All reproduced:
+
+- **`formula_*` was never reserved.** `model_builder` mints ids as
+  `formula_<display name>`, so a physical Domo column named `formula_Net` aliased the id
+  of a Beast Mode named `Net`. A formula authored as 0.9 × money shipped as 0.9 ×
+  quantity — `Migrated`, empty note, `ts tml lint` clean. The prefix is now reserved and
+  such a column is renamed (the prefix **stripped**, not suffixed: an early attempt
+  produced `formula_Net (column)`, which still aliased).
+- **A fourth naming authority.** `build_model` still called
+  `formula_common.resolve_name_collisions`, which resolves a column/formula clash by
+  **dropping the column** — poisoning every other formula that referenced it. It is no
+  longer used as a mutation; see #24.
+- **The table pass was decorative.** `taken` was dead after the table loop, so a dataset
+  and a column could share a name unrenamed and unreported. Tables, columns and formulas
+  now share ONE reserved set.
+- **The join graph keyed on raw dataset names**, so two same-named datasets produced
+  `[Sales::Order ID] = [Sales::Order ID]` — a self-join — plus a disconnected second
+  table, both `Migrated`. `_infer_joins`, the `directed` map and `rows_by_table` all key
+  on the resolved name now, and filenames have their own namespace (`Sales-Data` and
+  `Sales Data` both slug to `Sales_Data` and one Table TML was silently discarded).
+- NFC/NFD names are compared normalised, so two visually identical columns cannot both
+  ship; a duplicate raw column name on one dataset is reported instead of overwritten.
+
+**Both property-test exemptions are gone** and the invariant now asserts *object*
+identity, not display-name membership — the previous version could not distinguish a
+physical column `formula_Net` from a reference to the formula whose id is `formula_Net`,
+which is exactly the conflation that hid the first path.
+
+## #24 — `resolve_name_collisions` as an assertion, not a mutation — VERIFIED
+
+`check_converter_parity` requires every formula-emitting converter to use this helper.
+Using it as a mutation is what caused the column-dropping above. It is now called as an
+**assertion**: `Index` guarantees a collision-free namespace, so the helper must find
+nothing, and if it ever does the build fails loudly with the offending names rather than
+shipping a quietly-different model. Verified to fire — neutering the index's formula
+reservation raises with `would drop ['Region', 'Revenue']`.
+
+The gate passes on the merits rather than by exemption.
+
+## #25 — Determinism is no longer an assumption — VERIFIED (fixed)
+
+`naming.py` claimed the index was safe to derive twice because "same bundle, same
+dataset order, same names". Dataset order was **filename sort order**
+(`sorted(glob(...))` in `parse_app`), so renaming a fixture file rewrote the namespace,
+and nothing bound the two CLI invocations together.
+
+- `ordered_datasets()` sorts by dataset id (tie-broken by name) — a property of the data.
+- `build-model` writes the resolved index to `mapping.json`; `build-liveboard` **loads**
+  it rather than re-deriving. Re-derivation still works but announces itself.
+- A `bundle_digest` is written and checked: `build-liveboard` refuses a `mapping.json`
+  built from a different bundle, because binding Answers to a stale Model produces wrong
+  numbers rather than an error.
+- `app.notes` are printed by every build command. Corrupting one dataset file previously
+  gave exit 0, no warning, and cards silently bound to the other table's columns —
+  round 1's original bug, reachable with no code change.
+
+## #26 — Host validation closed the class, not four spellings — VERIFIED (fixed)
+
+`_reject_internal_host` classified only canonical IP literals, so `localhost`,
+`2130706433`, `127.1`, `0177.1` and `0x7f.1` all reached loopback and the token was
+delivered. And Python's IDNA codec treats U+3002/U+FF0E/U+FF61 as label separators, so
+`acme.domo.com。evil.example` connected to `acme.domo.com.evil.example` while every UI
+string rendered the original — the same threat the userinfo `@` check exists to prevent.
+
+Now: those separators are refused; non-ASCII hosts are IDNA-encoded so what is validated
+is what urllib sends; numeric IPv4 shorthands are canonicalised via `inet_aton` before
+classification; `localhost`/`.local`/`.internal` forms are refused by name; and the host
+is resolved with every returned address classified. 16 hostile inputs refused, legitimate
+tenants unaffected.
+
+**Stated as a limitation rather than a guarantee**, in both the module docstring and the
+SKILL.md bullet: resolution is a validation-time check, DNS can change afterwards
+(rebinding), and an unresolvable host is allowed through so the CLI works offline. The
+previous SKILL.md sentence claimed "refuses loopback/link-local/private hosts" while
+classifying only canonical literals — a false guardrail reintroduced inside the fix for
+one, which is worse than none because it tells the next reader not to look.
+
+Also: server-controlled text is stripped of control bytes before it can reach a terminal
+(a transcript-forgery primitive), an undecodable body is an error rather than a
+traceback, and `test_no_bypass_flag_exists` asserts positive properties — no TLS context
+is constructed, no env var relaxes validation, exactly one request path — instead of
+grepping for five literals, of which it caught one.
+
+## #27 — The report no longer contradicts its own mapping — VERIFIED (fixed)
+
+`_risk_level` had been generalised for `Approximated` only, so a bundle that dropped 7
+joins still headlined "Automation 100% · Risk Low — clean conversion". Dropped joins and
+findings are now inputs, dropped joins are in the automation denominator, and the risk
+text names them. A clean bundle still reports Low / 100% / 90.
+
+`n_pages or 1` invented a page, so running `report` after `build-model` alone produced
+"Pages → Liveboards | 0 |" in the table and "the 1 Domo page(s) map to 1 Liveboard(s)"
+in the prose of the same document. Removed.
+
+Aggregation switches (`SUM` → `AVERAGE` from the shared emitter's name heuristic) were
+filed under `invariant_findings` and mislabelled "TML invariant" — it is a semantics
+change. They now have their own class, appear on the affected measure's own row as
+`Approximated`, and are scoped with `formula_common.expr_is_aggregated` so an
+already-aggregating formula (where the property is metadata and applies to nothing) is
+not reported.
+
+## #28 — `_looks_like_key` had no test at all — VERIFIED (fixed)
+
+Round 3 claimed "20 cases pinned, both classes". `grep -rn '_looks_like_key' tests/`
+returned zero matches: the pinning happened in a session and was never committed. That
+is the fourth occurrence of the record running ahead of the change, and the most
+`grep`-able one.
+
+`tests/test_domo_naming.py` pins 35 cases across both directions, and writing them
+immediately found two live bugs the claim had covered for: `urn` matched as a *glued*
+suffix so `Churn`, `Return`, `Turn` and `Saturn` were all treated as join keys, and
+singular/plural disagreed (`bid` False, `bids` True). `urn` now matches only as a
+separated token, and a glued suffix requires two characters of stem — which is also what
+makes the plural consistent.
+

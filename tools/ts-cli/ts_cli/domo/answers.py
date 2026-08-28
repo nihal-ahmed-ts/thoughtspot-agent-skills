@@ -12,8 +12,8 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from .ir import Card, DomoApp
-from .naming import Index, build_index
+from .ir import Card, DomoApp, note_rows
+from .naming import Index, build_index, bundle_digest
 
 # Domo chartType -> ThoughtSpot chart.type (verified enum, thoughtspot-chart-types.md)
 _CHART_MAP = {
@@ -264,21 +264,13 @@ def _report_skipped_pages(app: DomoApp, card_by_urn: dict,
     return skipped_pages
 
 
-def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
-                              model_fqn: Optional[str] = None,
-                              report_name: Optional[str] = None) -> dict:
-    index = build_index(app)
-    page = app.pages[0] if app.pages else None
-    report_name = report_name or (page.name if page else app.app_name) or "Domo Liveboard"
-    order = page.card_ids if page else [c.urn for c in app.cards]
-    card_by_urn = {c.urn: c for c in app.cards}
-
+def _assemble_page(order: list, card_by_urn: dict, model_name: str,
+                   model_fqn: Optional[str], index: Index) -> tuple[list, list, list]:
+    """Build the Answers, tile layout and mapping rows for the first page."""
     vizzes: list[dict] = []
     tiles: list[dict] = []
     mapping_cards: list[dict] = []
-    x = y = 0
-    row_h = 0
-    idx = 0
+    x = y = row_h = idx = 0
     for urn in order:
         card = card_by_urn.get(str(urn))
         if not card:
@@ -303,6 +295,30 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
         x += w
         row_h = max(row_h, h)
         mapping_cards.append(_card_mapping_row(card, ans, review, reason, dropped))
+    return vizzes, tiles, mapping_cards
+
+
+def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
+                              model_fqn: Optional[str] = None,
+                              report_name: Optional[str] = None,
+                              index: Optional[Index] = None) -> dict:
+    """Build Answer + Liveboard TML.
+
+    `index` should be the namespace `build-model` resolved and wrote to `mapping.json`.
+    Passing it is what makes the two stages agree by construction rather than by both
+    re-deriving the same rule and hoping. When it is omitted the index is re-derived
+    (deterministically) and `mapping["index_rederived"]` is set so the caller can warn.
+    """
+    rederived = index is None
+    if index is None:
+        index = build_index(app)
+    page = app.pages[0] if app.pages else None
+    report_name = report_name or (page.name if page else app.app_name) or "Domo Liveboard"
+    order = page.card_ids if page else [c.urn for c in app.cards]
+    card_by_urn = {c.urn: c for c in app.cards}
+
+    vizzes, tiles, mapping_cards = _assemble_page(
+        order, card_by_urn, model_name, model_fqn, index)
 
     skipped_pages = _report_skipped_pages(app, card_by_urn, mapping_cards)
 
@@ -314,6 +330,10 @@ def build_liveboard_artifacts(app: DomoApp, *, model_name: str,
     mapping = {
         "pages": ([{"name": report_name, "cards": len(vizzes)}] + skipped_pages),
         "cards": mapping_cards,
+        "index_rederived": rederived,
+        "bundle_digest": index.bundle_digest or bundle_digest(app),
+        "name_ambiguities": list(index.ambiguities),
+        "parse_notes": note_rows(app),
     }
     return {
         "liveboard": {"filename": f"{_slug(report_name)}.liveboard.tml", "tml": lb_tml},

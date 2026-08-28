@@ -109,3 +109,18 @@ class DomoApp:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def note_rows(app) -> list[dict]:
+    """Parser notes as plain JSON-serialisable dicts.
+
+    `ExtractionNote` is a dataclass, so putting the raw objects into `mapping.json`
+    broke `json.dumps` for the whole command. One definition, used by both build
+    stages — two inline copies is how the naming rule drifted in earlier rounds.
+    """
+    return [{
+        "severity": str(getattr(n, "severity", "") or "note"),
+        "area": str(getattr(n, "area", "") or ""),
+        "message": str(getattr(n, "message", None) or n),
+    } for n in list(getattr(app, "notes", []) or [])]
+

@@ -15,6 +15,25 @@ app = typer.Typer(help="Domo → ThoughtSpot conversion from a captured offline 
 _MODE_HELP = "Extraction mode. Only 'offline' is implemented."
 
 
+def _echo_parse_notes(app_ir) -> None:
+    """Print parser notes to stderr.
+
+    `parse_app` swallows an unreadable dataset file into `app.notes`, and neither build
+    command ever printed them — so corrupting one dataset file gave exit 0, no warning,
+    and cards silently bound to the other table's columns.
+    """
+    notes = list(getattr(app_ir, "notes", []) or [])
+    if not notes:
+        return
+    typer.echo(f"  {len(notes)} parser note(s) — read these before trusting the output:",
+               err=True)
+    for n in notes:
+        msg = getattr(n, "message", None) or str(n)
+        area = getattr(n, "area", "") or ""
+        sev = (getattr(n, "severity", "") or "note").upper()
+        typer.echo(f"    - [{sev}] {area}: {msg}".replace(": :", ":"), err=True)
+
+
 def _check_mode(mode: str) -> str:
     """Reject any mode other than offline.
 
@@ -70,6 +89,7 @@ def parse_cmd(
     from ts_cli.domo.parsing import build_inventory, parse_app
 
     app_ir = parse_app(input_dir, mode=_check_mode(mode))
+    _echo_parse_notes(app_ir)
     inv = build_inventory(app_ir)
     out = Path(output_file)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +115,7 @@ def build_model_cmd(
     from ts_cli.tml_common import dump_tml_yaml
 
     app_ir = parse_app(input_dir, mode=_check_mode(mode))
+    _echo_parse_notes(app_ir)
     explicit_joins = None
     if etl:
         from ts_cli.domo.magic_etl import parse_etl
@@ -159,12 +180,39 @@ def build_liveboard_cmd(
     mode: str = typer.Option("offline", "--mode", help=_MODE_HELP),
 ) -> None:
     from ts_cli.domo.answers import build_liveboard_artifacts
+    from ts_cli.domo.naming import bundle_digest, index_from_dict
     from ts_cli.domo.parsing import parse_app
     from ts_cli.tml_common import dump_tml_yaml
 
     app_ir = parse_app(input_dir, mode=_check_mode(mode))
+    _echo_parse_notes(app_ir)
+
+    # Bind against the namespace `build-model` resolved, rather than re-deriving it.
+    # Re-deriving is deterministic but cannot detect that the bundle changed between
+    # the two commands, which is how an Answer ends up bound to another layout's Model.
+    index = None
+    mapping_path = Path(output_dir) / "mapping.json"
+    if mapping_path.is_file():
+        prior = json.loads(mapping_path.read_text())
+        digest = bundle_digest(app_ir)
+        if prior.get("bundle_digest") and prior["bundle_digest"] != digest:
+            typer.echo(
+                f"mapping.json in {output_dir} was built from a different bundle "
+                f"({prior['bundle_digest']} != {digest}). Re-run `ts domo build-model` "
+                "against this bundle — binding Answers to a stale Model would produce "
+                "wrong numbers, not an error.", err=True)
+            raise typer.Exit(2)
+        if prior.get("name_index"):
+            index = index_from_dict(prior["name_index"])
+    if index is None:
+        typer.echo(
+            "  NOTE: no resolved name index found — re-deriving it from the bundle. "
+            "Run `ts domo build-model` into the same --output-dir first so both stages "
+            "provably share one namespace.", err=True)
+
     arts = build_liveboard_artifacts(
-        app_ir, model_name=model_name, model_fqn=model_fqn, report_name=report_name)
+        app_ir, model_name=model_name, model_fqn=model_fqn, report_name=report_name,
+        index=index)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / arts["liveboard"]["filename"]).write_text(dump_tml_yaml(arts["liveboard"]["tml"]))

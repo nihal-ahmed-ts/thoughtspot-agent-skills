@@ -265,8 +265,9 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
   column. A reference that resolves to nothing the Model exposes is flagged, not shipped.
   Flagged formulas are wrapped in `/* TODO review: … */` so one untranslatable measure no
   longer makes the whole model TML unimportable. Cards on Domo pages 2..n are reported
-  `Skipped` instead of vanishing. Magic ETL `relationshipType` is honoured, with a Domo
-  many-to-many warned about rather than flattened to MANY_TO_ONE. `Approximated` now
+  `Skipped` instead of vanishing. Magic ETL `relationshipType` is honoured (read before
+  orientation, so a declared `OTM` is not inverted); a Domo many-to-many is flattened to
+  MANY_TO_ONE *and* warned about on the join's own row, since ThoughtSpot cannot express it. `Approximated` now
   reaches the risk score, verification checklist and scorecard, not just Manual review.
   Plus: the structural-construct check no longer misfires on columns named "Case …";
   id-like join-key detection no longer matches `Paid`/`Void`/`Valid`; `DATEDIFF` arity is
@@ -274,6 +275,19 @@ Skill-level changes are tracked in each skill's own `## Changelog` section.
   longer derived in two places (the divergence that caused #16), `BeastMode.status` is
   honoured instead of ignored, and card column aliases are documented as unmapped
   (`open-items.md` #22).
+
+  Fourth review round — the binding class closed at the namespace rather than at the call
+  sites. `naming.Index` now owns tables, columns, formulas **and** the generated
+  `formula_*` id space in one reserved set (a Domo column named `formula_Net` previously
+  aliased a Beast Mode's id and shipped the wrong column, lint-clean), compares names
+  NFC-normalised, and owns emitted filenames. `resolve_name_collisions` is used as an
+  assertion rather than a mutation, so it can no longer drop a column. Determinism is
+  explicit: datasets order by id rather than filename glob, `build-model` writes the
+  resolved index and `build-liveboard` loads it, a bundle digest is refused on mismatch,
+  and parser notes are printed. Host validation closes the shorthand-IP and IDNA-separator
+  classes and states its own limitation. `_risk_level` accounts for dropped joins and
+  findings; aggregation switches moved onto the affected measure's row
+  (`open-items.md` #23–#28).
 
 - **`ts-profile-domo` — Domo credential setup** (new skill, v1.0.0). Adds `domo` as a real
   platform to `ts profiles add/list/update/remove/sync-env`: `developer-token` auth, the

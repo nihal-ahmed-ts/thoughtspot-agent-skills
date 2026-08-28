@@ -16,7 +16,7 @@ Constructs. Source of truth for the formula rows is
 |---|---|---|---|
 | Dataset (`schema.columns`) | Table TML | Migrated | type map: STRING/DATETIME/DOUBLE/LONG |
 | Dataset-to-dataset join (no ETL) | Model join | NEEDS REVIEW | **inferred by shared column name** — Domo carries no relationship metadata. One join per dataset pair on an id-like key; a pair sharing only incidental columns is left unjoined and reported. Emitted `NEEDS REVIEW` in `mapping.json` — confirm cardinality |
-| Magic ETL join graph (`--etl`) | Model joins | NEEDS REVIEW | `MergeJoin` keys + type → model joins (preferred over inference). Table names are reconciled against the bundle's datasets; unmatched joins are dropped and reported. `relationshipType` is honoured where ThoughtSpot can express it — a Domo **many-to-many** cannot be, and is warned about loudly rather than emitted as MANY_TO_ONE |
+| Magic ETL join graph (`--etl`) | Model joins | NEEDS REVIEW | `MergeJoin` keys + type → model joins (preferred over inference). Table names are reconciled against the bundle's datasets; unmatched joins are dropped and reported. `relationshipType` is honoured where ThoughtSpot can express it — a Domo **many-to-many** cannot be: it **is** emitted `MANY_TO_ONE` so the Model still builds, **and** the join's own report row carries a warning that measures fan out until a bridge table exists |
 | Beast Mode (global) | Model formula | Migrated | deterministic subset only; window/LOD → NEEDS REVIEW |
 | Card-local `calculatedFields` | Model formula | Migrated | deduped against global Beast Modes by `(dataset, name)` |
 | Card `kpi` | Answer (KPI/headline) | Migrated | from `summaryNumber` |

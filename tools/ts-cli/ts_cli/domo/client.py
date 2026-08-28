@@ -21,11 +21,28 @@ does for you. All four of these were live defects found in review:
   stripping it does for `Authorization` does not apply to `X-DOMO-Developer-Token`.
   A 302 to another origin therefore handed the token to that origin. Verified
   against two local servers; now refused.
-- **The host is validated.** `https://acme.domo.com@example.com` connects to
-  example.com while every UI string shows acme.domo.com; a bare `169.254.169.254`
-  reaches cloud metadata; `https://evil.com/?x=` turns each path into a query
-  parameter. Userinfo, query and fragment are rejected, and the path is built with
-  `urljoin`-safe concatenation off a normalised origin.
+- **The host is validated, syntactically and by resolution.** `https://acme.domo.com@example.com`
+  connects to example.com while every UI string shows acme.domo.com; a bare
+  `169.254.169.254` reaches cloud metadata; `https://evil.com/?x=` turns each path
+  into a query parameter. Userinfo, query, fragment and path are rejected.
+
+  An earlier version classified only *canonical* IP literals, which closed four
+  spellings of one address rather than the class — `localhost`, `2130706433`,
+  `127.1`, `0177.1` and `0x7f.1` all reached loopback. And Python's IDNA codec treats
+  U+3002 / U+FF0E / U+FF61 as label separators, so `acme.domo.com。evil.example`
+  connected to `acme.domo.com.evil.example` while every UI string rendered the
+  original — precisely what the userinfo check exists to prevent.
+
+  Now: non-ASCII hosts are IDNA-encoded and alternative label separators refused;
+  numeric IPv4 shorthands are canonicalised via `inet_aton` before classification;
+  loopback hostname forms are refused by name; and the host is resolved and every
+  returned address classified.
+
+  **Limitation, stated plainly because a guardrail nobody can audit is worse than
+  none:** resolution is a check at validation time, not a guarantee. DNS can change
+  between this check and the request (rebinding), and a resolution failure is not
+  treated as fatal so the CLI still works offline. This is defence in depth, not a
+  proof.
 - **Server text never reaches the terminal.** The response body was interpolated
   into the exception, which `ts domo signin` prints — so a host the operator was
   tricked into naming could echo the token back into their transcript. Only the
@@ -39,6 +56,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,9 +67,32 @@ from typing import Any, Callable, Optional
 # downgraded, because the credential travels in a header on every request.
 _ALLOWED_SCHEMES = ("https",)
 
+# Unicode characters Python's IDNA codec treats as label separators. A host carrying
+# one connects somewhere other than what the UI renders.
+_IDNA_SEPARATORS = ("\u3002", "\uff0e", "\uff61")
+
+# Hostname forms that mean "this machine" without being IP literals.
+_LOCAL_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+_LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain")
+
 
 class DomoError(RuntimeError):
     pass
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _safe(text: str, limit: int = 80) -> str:
+    """Strip control bytes from server-controlled text before it can be printed.
+
+    The HTTP reason phrase comes from the server. Raw ANSI/BEL/backspace bytes in an
+    exception that reaches a terminal are a transcript-forgery primitive — a host can
+    redraw what the operator appears to have seen. What saved this before was
+    incidental (`json.dumps` at one call site escapes C0); eight sibling call sites
+    use `typer.echo(str(e))` and would not have.
+    """
+    return _CONTROL.sub("", str(text or ""))[:limit]
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -67,19 +109,43 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
             "developer token would be replayed onto that host. Check the instance URL.")
 
 
-def normalise_instance(instance: str) -> str:
-    """Validate a Domo instance URL and return its bare origin.
+def _is_internal(ip) -> bool:
+    return bool(ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified)
 
-    Raises DomoError with the reason, rather than silently accepting something that
-    sends the token somewhere unintended.
+
+def _as_ip(host: str):
+    """Parse `host` as an IP, accepting the shorthand forms `ip_address` rejects.
+
+    `2130706433`, `127.1`, `0177.1` and `0x7f.1` are all loopback to the resolver but
+    are not canonical literals, so classifying only canonical forms closed four
+    spellings of one address instead of the class.
     """
-    raw = (instance or "").strip()
-    if not raw:
-        raise DomoError("Domo instance is empty")
-    if "://" not in raw:
-        raw = "https://" + raw
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+    except (OSError, ValueError):
+        return None
 
-    parts = urllib.parse.urlsplit(raw)
+
+def _reject_separators(raw: str) -> None:
+    """Alternative IDNA label separators change which host is contacted.
+
+    Same threat as a userinfo '@': every UI string keeps rendering the original.
+    """
+    for sep in _IDNA_SEPARATORS:
+        if sep in raw:
+            raise DomoError(
+                f"Domo instance contains the Unicode label separator {sep!r} "
+                f"(U+{ord(sep):04X}), which Python's IDNA codec treats as a dot — "
+                f"{raw!r} would connect to a different host than it appears to name.")
+
+
+def _reject_url_shape(raw: str, parts) -> None:
+    """Refuse anything that is not a bare origin."""
     if parts.scheme not in _ALLOWED_SCHEMES:
         raise DomoError(
             f"Domo instance must use https:// (got {parts.scheme!r}). The developer "
@@ -98,28 +164,83 @@ def normalise_instance(instance: str) -> str:
             f"Domo instance must be a bare host, with no path (got {raw!r}).")
     if not parts.hostname:
         raise DomoError(f"Domo instance has no host: {raw!r}")
-    _reject_internal_host(parts.hostname)
-    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _ascii_host(hostname: str) -> str:
+    """IDNA-encode so what is validated is what urllib will send."""
+    if hostname.isascii():
+        return hostname
+    try:
+        return hostname.encode("idna").decode("ascii")
+    except UnicodeError as e:
+        raise DomoError(
+            f"Domo instance host {hostname!r} is not a valid IDNA name: {e}") from None
+
+
+def normalise_instance(instance: str) -> str:
+    """Validate a Domo instance URL and return its bare origin.
+
+    Raises DomoError with the reason, rather than silently accepting something that
+    sends the token somewhere unintended.
+    """
+    raw = (instance or "").strip()
+    if not raw:
+        raise DomoError("Domo instance is empty")
+    if "://" not in raw:
+        raw = "https://" + raw
+
+    _reject_separators(raw)
+    parts = urllib.parse.urlsplit(raw)
+    _reject_url_shape(raw, parts)
+
+    host = _ascii_host(parts.hostname)
+    _reject_internal_host(host)
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}"
 
 
 def _reject_internal_host(host: str) -> None:
-    """Refuse loopback / link-local / private literals.
+    """Refuse hosts that are not a public tenant, syntactically and by resolution.
 
-    A Domo tenant is SaaS and never on one of these, but `169.254.169.254` is the
-    cloud metadata service and the rest are the usual SSRF pivots. Requiring HTTPS
-    already blocks the plain-HTTP metadata endpoint; this closes the class rather
-    than that one instance. There is deliberately no override flag.
+    A Domo tenant is SaaS and never loopback/link-local/private; `169.254.169.254` is
+    the cloud metadata service and the rest are the usual SSRF pivots. There is
+    deliberately no override flag.
+
+    See the module docstring for the limitation: resolution here is defence in depth,
+    not a proof, because DNS can change between this check and the request.
     """
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return                     # a DNS name — nothing to classify here
-    if (ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved
-            or ip.is_multicast or ip.is_unspecified):
+    low = host.strip().lower().rstrip(".")
+
+    ip = _as_ip(low)
+    if ip is not None:
+        if _is_internal(ip):
+            raise DomoError(
+                f"Domo instance must be a public tenant host (got {host!r}, which "
+                f"resolves to the {ip} loopback/link-local/private address). A Domo "
+                "tenant looks like https://<tenant>.domo.com.")
+        return
+
+    if low in _LOCAL_NAMES or low.endswith(_LOCAL_SUFFIXES):
         raise DomoError(
-            f"Domo instance must be a public tenant host (got {host!r}, which is a "
-            "loopback/link-local/private address). A Domo tenant looks like "
-            "https://<tenant>.domo.com.")
+            f"Domo instance must be a public tenant host (got {host!r}, which names "
+            "the local machine or a private zone).")
+
+    # Resolve and classify every address behind the name.
+    try:
+        infos = socket.getaddrinfo(low, None)
+    except OSError:
+        return          # offline / unresolvable — not treated as fatal, see docstring
+    for info in infos:
+        addr = info[4][0]
+        try:
+            resolved = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if _is_internal(resolved):
+            raise DomoError(
+                f"Domo instance {host!r} resolves to {resolved}, which is a "
+                "loopback/link-local/private address. Refusing to send the developer "
+                "token there.")
 
 
 class DomoClient:
@@ -160,17 +281,23 @@ class DomoClient:
             self._url(path), data=data, headers=self._headers(), method=method)
         try:
             with self._opener.open(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode()
+                # errors="replace": a non-UTF-8 body raised an uncaught
+                # UnicodeDecodeError that replaced the reachability report with a
+                # traceback.
+                raw = resp.read().decode("utf-8", errors="replace")
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as e:
             # Status + reason only. The response BODY is attacker-controlled and
             # `ts domo signin` prints DomoError text to the operator's terminal.
-            reason = str(getattr(e, "reason", "") or "")[:80]
-            raise DomoError(f"{method} {path} -> HTTP {e.code} {reason}".rstrip()) from None
+            raise DomoError(
+                f"{method} {path} -> HTTP {e.code} "
+                f"{_safe(getattr(e, 'reason', ''))}".rstrip()) from None
         except DomoError:
             raise
         except urllib.error.URLError as e:
             raise DomoError(f"{method} {path} -> {type(e).__name__}") from None
+        except (UnicodeDecodeError, UnicodeError):
+            raise DomoError(f"{method} {path} -> response was not decodable") from None
         except json.JSONDecodeError:
             raise DomoError(f"{method} {path} -> response was not JSON") from None
 

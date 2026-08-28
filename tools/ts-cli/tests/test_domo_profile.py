@@ -194,14 +194,58 @@ class TestInstanceValidation:
         assert normalise_instance(instance) == expected
 
     def test_no_bypass_flag_exists(self):
-        """A security control with an override is not a control."""
+        """A security control with an override is not a control.
+
+        Grepping for literals caught 1 of 8 realistic bypasses (and one of the five it
+        looked for was a `requests` idiom this module doesn't use), so this asserts
+        POSITIVE properties of the code instead: no TLS context is constructed, no
+        env var can relax validation, and every request goes through the one opener.
+        """
         import inspect
 
         from ts_cli.domo import client
         src = inspect.getsource(client)
-        for knob in ("verify=False", "allow_http", "insecure", "skip_verify",
-                     "ssl._create_unverified"):
-            assert knob not in src, f"bypass knob present: {knob}"
+
+        # No way to build or weaken an SSL context.
+        for banned in ("ssl.", "_create_unverified", "SSLContext", "CERT_NONE",
+                       "check_hostname", "verify=False", "verify = False"):
+            assert banned not in src, f"TLS control surface present: {banned}"
+
+        # Validation must not be reachable from the environment.
+        env_reads = [ln for ln in src.splitlines()
+                     if "os.environ" in ln or "getenv" in ln]
+        for ln in env_reads:
+            assert "token_env" in ln or "env_var" in ln, (
+                f"environment read outside credential resolution: {ln.strip()}")
+
+        # Exactly one request path, and it uses the redirect-refusing opener.
+        assert src.count("urlopen(") == 0, "a bare urlopen bypasses the opener"
+        assert src.count("self._opener.open(") == 1, "more than one request path"
+
+        # The scheme allowlist is a constant, not a parameter.
+        assert '_ALLOWED_SCHEMES = ("https",)' in src
+
+    def test_control_bytes_are_stripped_from_server_text(self):
+        from ts_cli.domo.client import _safe
+        assert _safe("Forbidden\x1b[2J\x07\x08bad") == "Forbidden[2Jbad"
+        assert "\x1b" not in _safe("\x1b]0;title\x07")
+
+    def test_undecodable_body_is_an_error_not_a_traceback(self, monkeypatch):
+        import io
+
+        from ts_cli.domo.client import DomoClient, DomoError
+
+        c = DomoClient("acme.domo.com", "tok")
+
+        class Resp(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        monkeypatch.setattr(c._opener, "open",
+                            lambda *a, **k: Resp(b"\xff\xfe not utf-8"))
+        with pytest.raises(DomoError) as e:
+            c.list_datasets()
+        assert "not" in str(e.value).lower()
 
 
 class TestRedirectsAreRefused:

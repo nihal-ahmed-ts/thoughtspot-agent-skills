@@ -120,10 +120,23 @@ macOS), and removing the `~/.zshenv` export line.
   and be echoed back by `ts profiles list --domo --json`. This is a limitation of the shared
   `ts profiles` substrate, not something this skill can guard; the correct flow is Step 3, which
   puts the token in the OS keychain and leaves only the env-var *name* in the profile.
-- The client requires `https://`, refuses redirects (a redirect target would otherwise be handed
-  the token), rejects a userinfo `@`, query, fragment or path in the instance URL, and refuses
-  loopback/link-local/private hosts. Server response bodies are never printed — only the status
-  code — because the body is chosen by whatever host the URL actually reached.
+- The client requires `https://` and refuses redirects — a redirect target would otherwise be
+  handed the token, because urllib replays custom headers onto the new host. Server response
+  bodies are never printed (only the status code and a control-character-stripped reason),
+  because the body is chosen by whatever host the URL actually reached.
+- Instance-URL validation rejects a userinfo `@`, a query, a fragment, a path, and the Unicode
+  label separators (U+3002/U+FF0E/U+FF61) that would connect somewhere other than the string
+  shown. Hosts are then classified: IP literals including the shorthand forms (`2130706433`,
+  `127.1`, `0177.1`), `localhost`/`.local`/`.internal` names, and — best-effort — every address
+  the name resolves to. Anything loopback/link-local/private is refused.
+
+  **What that is not:** a guarantee. It is a check at validation time, so DNS can change between
+  the check and the request, and an unresolvable host is allowed through so the CLI works
+  offline. Treat it as defence in depth. The reason this is spelled out rather than summarised
+  as "refuses internal hosts" is that an earlier version of this bullet claimed exactly that
+  while classifying only canonical IP literals — `localhost` and four spellings of loopback went
+  straight through. A guardrail described more strongly than it behaves stops the next reader
+  looking.
 
 ---
 

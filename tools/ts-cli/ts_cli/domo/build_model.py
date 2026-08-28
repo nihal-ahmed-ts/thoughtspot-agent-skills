@@ -9,11 +9,18 @@ import re
 from typing import Optional
 
 from ts_cli.databricks.mv_tml import validate_tml_invariants
+from ts_cli.formula_common import expr_is_aggregated, resolve_name_collisions
 from ts_cli.model_builder import build_model_tml
 
 from .functions import translate
-from .ir import Dataset, DomoApp
-from .naming import Index, build_index, deduped_beast_modes
+from .ir import Dataset, DomoApp, note_rows
+from .naming import (
+    Index,
+    build_index,
+    deduped_beast_modes,
+    index_to_dict,
+    ordered_datasets,
+)
 
 # Domo dataset type -> ThoughtSpot data_type
 _TYPE_MAP = {
@@ -87,30 +94,39 @@ _NOT_KEYS = {
 }
 
 
+# Suffixes safe to match when GLUED to a stem. `urn` is deliberately absent: too many
+# ordinary words end in it (Churn, Return, Turn, Saturn), and matching it there silently
+# changed which column two tables joined on. `urn` still matches as a separated token.
+_GLUED_SUFFIXES = ("ids", "id", "keys", "key", "codes", "code", "guid", "uuid")
+
+
 def _looks_like_key(name: str) -> bool:
     """True when the name ends in an id-like token.
 
-    Three shapes have to work, and an earlier fix traded one for another:
+    Three shapes have to work, and earlier fixes traded one for another:
 
-    - separated  — `Customer ID`, `order_guid`, `sku_code`
+    - separated  — `Customer ID`, `order_guid`, `row urn`
     - camelCase  — `customerId`, `userIds`
     - glued      — `orderid`, `custid`, `CUSTOMERID`, `SSID`
 
-    A pure token test (split, then match the last token) handles the first two and
-    fails every glued form; a pure suffix test handles glued forms and also matches
-    `Paid`/`Void`/`Valid`. So: token test first, then a suffix test guarded by
-    `_NOT_KEYS` and by requiring something before the token.
+    A token-only test (split, match the last token) handles the first two and fails
+    every glued form. A suffix-only test handles glued forms and also matches
+    `Paid`/`Void`/`Valid`. So: token test first, then a *restricted* glued-suffix test,
+    guarded by `_NOT_KEYS` and by requiring at least two characters of stem — which is
+    also what keeps singular and plural agreeing (`bid`/`bids` are both False).
     """
     spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name.strip())
     tokens = [t for t in _KEY_TOKEN_RE.split(spaced.lower()) if t]
     if not tokens:
         return False
-    if tokens[-1] in _KEY_TOKENS:
-        return True
     last = tokens[-1]
-    if last in _NOT_KEYS:
+    if last in _KEY_TOKENS:
+        return True
+    base = last[:-1] if last.endswith("s") and len(last) > 1 else last
+    if last in _NOT_KEYS or base in _NOT_KEYS:
         return False
-    return any(last.endswith(k) and len(last) > len(k) for k in _KEY_TOKENS)
+    return any(last.endswith(sfx) and len(last) >= len(sfx) + 2
+               for sfx in _GLUED_SUFFIXES)
 
 
 def _pick_join_key(shared: set[str]) -> tuple[str | None, str]:
@@ -134,7 +150,8 @@ def _pick_join_key(shared: set[str]) -> tuple[str | None, str]:
                            f"{', '.join(ranked)}")
 
 
-def _infer_joins(datasets: list[Dataset]) -> tuple[list[dict], list[tuple], list[str], list[str]]:
+def _infer_joins(datasets: list[Dataset],
+                 index: Index) -> tuple[list[dict], list[tuple], list[str], list[str]]:
     """Domo carries no join metadata — infer ONE join per dataset pair, and flag.
 
     Emitting one join per shared column (the previous behaviour) produced duplicate
@@ -148,20 +165,25 @@ def _infer_joins(datasets: list[Dataset]) -> tuple[list[dict], list[tuple], list
     for i in range(len(datasets)):
         for j in range(i + 1, len(datasets)):
             a, b = datasets[i], datasets[j]
+            # Resolved names: two datasets sharing a raw name previously produced
+            # `[Sales::Order ID] = [Sales::Order ID]` — a self-join — plus a
+            # disconnected second table, both reported Migrated.
+            an = index.table(a.id) or a.name
+            bn = index.table(b.id) or b.name
             shared = {c.name for c in a.columns} & {c.name for c in b.columns}
-            if not shared:
+            if not shared or an == bn:
                 continue
             key, note = _pick_join_key(shared)
             if key is None:
-                drops.append(f"{a.name} ↔ {b.name}: {note}")
+                drops.append(f"{an} ↔ {bn}: {note}")
                 continue
             if note:
-                advisories.append(f"{a.name} ↔ {b.name}: {note}")
+                advisories.append(f"{an} ↔ {bn}: {note}")
             joins.append({
-                "left_table": a.name, "right_table": b.name, "type": "LEFT_OUTER",
+                "left_table": an, "right_table": bn, "type": "LEFT_OUTER",
                 "keys": [{"left": key, "right": key}],
             })
-            notes.append((a.name, b.name, key))
+            notes.append((an, bn, key))
     return joins, notes, drops, advisories
 
 
@@ -216,13 +238,15 @@ def _build_tables_and_columns(app: DomoApp, connection_name: str, db: str, schem
     tables: list[dict] = []
     columns: list[dict] = []
 
-    for ds in app.datasets:
+    for ds in ordered_datasets(app):
         table = index.table(ds.id) or ds.name
         doc = _build_table_doc(ds, connection_name, db, schema, type_overrides)
         # `name` is the Model-facing (possibly disambiguated) name; `db_table` stays
         # the physical Domo dataset name the warehouse table is actually called.
         doc["table"]["name"] = table
-        table_docs[f"{_slug(table)}.table.tml"] = doc
+        # The filename comes from the index too: two datasets whose names slug to the
+        # same string used to silently collapse into one .table.tml.
+        table_docs[index.table_file(ds.id) or f"{_slug(table)}.table.tml"] = doc
         tables.append({"name": table, "db_table": ds.name})
         for c in ds.columns:
             ts_type = _ts_type(c.domo_type, type_overrides, c.name)
@@ -234,7 +258,7 @@ def _build_tables_and_columns(app: DomoApp, connection_name: str, db: str, schem
     return table_docs, tables, columns, list(index.renames)
 
 
-def _resolve_joins(app: DomoApp,
+def _resolve_joins(app: DomoApp, index: Index,
                    explicit_joins: Optional[list]) -> tuple[list, list, str, list[str], list[str]]:
     """Return (joins, join_notes, join_source, warnings).
 
@@ -244,7 +268,10 @@ def _resolve_joins(app: DomoApp,
     reported while being silently dropped from the TML.
     """
     if explicit_joins is not None:
-        known = {d.name for d in app.datasets}
+        # ETL joins name Domo datasets; match against BOTH the raw and resolved names
+        # so a renamed dataset still reconciles.
+        raw_to_resolved = {d.name: (index.table(d.id) or d.name) for d in app.datasets}
+        known = set(raw_to_resolved) | set(raw_to_resolved.values())
         matched, drops = [], []
         for j in explicit_joins:
             left, right = j.get("left_table"), j.get("right_table")
@@ -255,12 +282,15 @@ def _resolve_joins(app: DomoApp,
                     "dataset in the bundle (Magic ETL uses dataflow action names) — "
                     "join dropped")
                 continue
+            j = dict(j)
+            j["left_table"] = raw_to_resolved.get(left, left)
+            j["right_table"] = raw_to_resolved.get(right, right)
             matched.append(j)
         notes = [(j["left_table"], j["right_table"],
                   ", ".join(k["left"] for k in j.get("keys", [])))
                  for j in matched]
         return matched, notes, "magic_etl", drops, []
-    joins, notes, drops, advisories = _infer_joins(app.datasets)
+    joins, notes, drops, advisories = _infer_joins(ordered_datasets(app), index)
     return joins, notes, "shared_column_name", drops, advisories
 
 
@@ -404,7 +434,8 @@ def _declared_cardinality(join: dict) -> tuple[Optional[str], Optional[str]]:
                   f"Domo relationshipType {declared!r} — cardinality inferred instead")
 
 
-def _apply_join_fixes(model_tml: dict, joins: list, app: DomoApp) -> None:
+def _apply_join_fixes(model_tml: dict, joins: list, app: DomoApp,
+                      index: Index) -> None:
     """Fix two things the shared model emitter does not, in place.
 
     1. A join must declare a cardinality (the emitter sets only type).
@@ -416,7 +447,8 @@ def _apply_join_fixes(model_tml: dict, joins: list, app: DomoApp) -> None:
     known, else MANY_TO_ONE.
     """
     directed = {(j["left_table"], j["right_table"]): j for j in joins}
-    rows_by_table = {ds.name: (ds.rows or 0) for ds in app.datasets}
+    rows_by_table = {(index.table(ds.id) or ds.name): (ds.rows or 0)
+                     for ds in app.datasets}
     for mt in model_tml.get("model", {}).get("model_tables", []):
         name = mt.get("name")
         kept = []
@@ -439,7 +471,8 @@ def _apply_join_fixes(model_tml: dict, joins: list, app: DomoApp) -> None:
             mt.pop("joins", None)
 
 
-def _aggregation_findings(model_tml: dict, index: Index) -> list[str]:
+def _aggregation_findings(model_tml: dict, index: Index,
+                          formula_exprs: Optional[dict] = None) -> list[dict]:
     """Report every measure the shared emitter did NOT give SUM.
 
     `model_builder._aggregation_for_name` switches rate/ratio/percent/score-shaped
@@ -447,27 +480,45 @@ def _aggregation_findings(model_tml: dict, index: Index) -> list[str]:
     ships as `aggregation: AVERAGE` — every number changes. The emitter's own comment
     calls this out; naming it is exactly this converter's job.
     """
-    findings: list[str] = []
+    findings: list[dict] = []
+    exprs = formula_exprs or {}
     for c in model_tml.get("model", {}).get("columns", []):
         props = c.get("properties", {})
         agg = props.get("aggregation")
         if props.get("column_type") != "MEASURE" or not agg or agg == "SUM":
             continue
-        findings.append(
-            f"'{c.get('name')}' was emitted with aggregation {agg} rather than SUM "
-            "(the name looked rate/ratio/average-shaped to the shared model emitter). "
-            "Domo's default is SUM — confirm which one this measure should use")
+        # A formula that already aggregates (`sum(x) / count(y)`) carries the properties
+        # aggregation as metadata — it is not applied on top, so switching it changes
+        # nothing. Only report where the aggregation actually governs the number:
+        # a plain dataset measure (Domo defaults to SUM) or a non-aggregating formula.
+        expr = exprs.get(c.get("name"))
+        if expr is not None and expr_is_aggregated(expr):
+            continue
+        findings.append({
+            "column": c.get("name"),
+            "aggregation": agg,
+            "note": (f"emitted with aggregation {agg} rather than SUM — the name looked "
+                     "rate/ratio/average-shaped to the shared model emitter. Domo's "
+                     "default is SUM, so every number for this measure changes; "
+                     "confirm which one is intended"),
+        })
     return findings
 
 
 def _build_mapping(app: DomoApp, join_notes: list, join_source: str,
                    mapping_formulas: list, renamed_cols: list,
-                   table_docs: dict) -> dict:
+                   table_docs: dict, joins: Optional[list] = None) -> dict:
     invariant_findings: list[str] = []
     for fn, doc in table_docs.items():
         invariant_findings += [f"{fn}: {m}" for m in validate_tml_invariants(doc)]
     note = ("from Magic ETL join graph" if join_source == "magic_etl"
             else "inferred by shared column name")
+    # Per-join cardinality warnings (e.g. a Domo many-to-many, which ThoughtSpot cannot
+    # express) must land on the join's OWN row. Previously they only reached the
+    # aggregate warning list, so the Relationships table showed just the provenance and
+    # the report claimed the warning appeared here when it did not.
+    per_join = {(j.get("left_table"), j.get("right_table")): j.get("cardinality_warning")
+                for j in (joins or []) if j.get("cardinality_warning")}
     return {
         "source": {"mode": app.extraction_mode, "app_name": app.app_name},
         "datasets": [
@@ -475,12 +526,53 @@ def _build_mapping(app: DomoApp, join_notes: list, join_source: str,
              "columns": len(d.columns), "status": "Migrated"} for d in app.datasets],
         "joins": [
             {"left": a, "right": b, "on": k, "inferred": True, "source": join_source,
-             "status": "NEEDS REVIEW", "note": note}
+             "status": "NEEDS REVIEW",
+             "note": "; ".join(x for x in (note, per_join.get((a, b))) if x)}
             for (a, b, k) in join_notes],
         "beast_modes": mapping_formulas,
         "renamed_columns": renamed_cols,
         "invariant_findings": invariant_findings,
     }
+
+
+def _assert_namespace_is_collision_free(columns: list, translated: list) -> None:
+    """Prove, every run, that `naming.Index` kept the Model namespace clean.
+
+    Uses the shared collision helper as an ASSERTION rather than a mutation. That
+    distinction matters: the helper resolves a clash by DROPPING the column, which
+    removes a dimension users search by and silently repoints every formula that
+    referenced it at a measure (PR #440 review, round 3). `Index` resolves formulas
+    into the same reserved namespace as columns, so nothing here can collide — and if
+    it ever does, that is an index bug we want to hear about loudly rather than ship a
+    quietly-different model.
+    """
+    checked_cols, _checked_formulas, renamed = resolve_name_collisions(
+        [dict(c) for c in columns], [dict(f) for f in translated], [])
+    if len(checked_cols) != len(columns) or renamed:
+        dropped = {c["name"] for c in columns} - {c["name"] for c in checked_cols}
+        raise AssertionError(
+            "naming.Index failed to keep the Model namespace collision-free: "
+            f"resolve_name_collisions would drop {sorted(dropped)} and rename "
+            f"{renamed}. This is an index bug — fix build_index rather than letting "
+            "the column be dropped.")
+
+
+def _annotate_aggregation_changes(mapping: dict, model_tml: dict, index: Index,
+                                  translated: list) -> None:
+    """Attach aggregation switches to the measure they affect, in place.
+
+    A switch is a SEMANTICS change, not a TML invariant, and the measure's own row must
+    stop claiming Migrated while the number silently changed.
+    """
+    agg = _aggregation_findings(
+        model_tml, index, {f["name"]: f["expr"] for f in translated})
+    mapping["aggregation_changes"] = agg
+    changed = {a["column"] for a in agg}
+    for row in mapping.get("beast_modes", []):
+        if row["name"] in changed:
+            note = next(a["note"] for a in agg if a["column"] == row["name"])
+            row["status"] = "Approximated"
+            row["note"] = "; ".join(x for x in (row.get("note"), note) if x)
 
 
 def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema: str,
@@ -500,10 +592,11 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
     table_docs, tables, columns, renamed_cols = _build_tables_and_columns(
         app, connection_name, db, schema, type_overrides, index)
     joins, join_notes, join_source, join_drops, join_advisories = _resolve_joins(
-        app, explicit_joins)
+        app, index, explicit_joins)
     translated, mapping_formulas = _translate_beast_modes(app, index)
 
-    rows_by_table = {ds.name: (ds.rows or 0) for ds in app.datasets}
+    rows_by_table = {(index.table(ds.id) or ds.name): (ds.rows or 0)
+                     for ds in app.datasets}
     join_advisories += _orient_joins(joins, rows_by_table)
     for j in joins:
         _c, warning = _declared_cardinality(j)
@@ -516,20 +609,27 @@ def build_model_artifacts(app: DomoApp, *, connection_name: str, db: str, schema
                    ", ".join(k["left"] for k in j.get("keys", [])))
                   for j in joins]
 
+    _assert_namespace_is_collision_free(columns, translated)
+
     model_tml = build_model_tml(
         model_name=model_name, connection_name=connection_name, tables=tables,
         columns=columns, joins=joins, parameters=[], translated_formulas=translated)
-    _apply_join_fixes(model_tml, joins, app)
+    _apply_join_fixes(model_tml, joins, app, index)
 
     mapping = _build_mapping(app, join_notes, join_source, mapping_formulas,
-                             renamed_cols, table_docs)
+                             renamed_cols, table_docs, joins)
     mapping["join_warnings"] = join_warnings
     mapping["join_drops"] = join_drops
     mapping["join_advisories"] = join_advisories
     mapping["formula_renames"] = list(index.formula_renames)
     mapping["table_renames"] = list(index.table_renames)
-    mapping["invariant_findings"] = (mapping.get("invariant_findings", [])
-                                     + _aggregation_findings(model_tml, index))
+    mapping["name_ambiguities"] = list(index.ambiguities)
+    mapping["parse_notes"] = note_rows(app)
+    # The resolved namespace, so `build-liveboard` binds against exactly these names
+    # rather than re-deriving and hoping the two agree.
+    mapping["bundle_digest"] = index.bundle_digest
+    mapping["name_index"] = index_to_dict(index)
+    _annotate_aggregation_changes(mapping, model_tml, index, translated)
     return {
         "tables": table_docs,
         "model": {"filename": f"{_slug(model_name)}.model.tml", "tml": model_tml},
