@@ -83,6 +83,8 @@ Assembled onto Liveboard **Sales Overview** (3 tiles).
 - **Card** `Net Revenue` (kpi, Approximated) — not carried onto the Answer — rebuild by hand: card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Region); conditional formatting (1 rule(s))
 - **Card** `Revenue by Region` (bar, Approximated) — not carried onto the Answer — rebuild by hand: sort (Total Revenue DESCENDING — Domo alias); card filter(s) (Transaction Date LAST_90_DAYS); quick filter(s) (Product Category)
 - **Card** `Sales Rep Performance` (table, Approximated) — not carried onto the Answer — rebuild by hand: sort (Net Revenue DESCENDING — Domo alias); card filter(s) (Transaction Date LAST_90_DAYS); number format on Net Revenue, Avg Order Value, Discount Rate %; non-SUM aggregation (Avg Order Value=AVG, Discount Rate %=AVG) — the Answer falls back to the Model default
+- **TML invariant** — 'Avg Order Value' was emitted with aggregation AVERAGE rather than SUM (the name looked rate/ratio/average-shaped to the shared model emitter). Domo's default is SUM — confirm which one this measure should use
+- **TML invariant** — 'Discount Rate %' was emitted with aggregation AVERAGE rather than SUM (the name looked rate/ratio/average-shaped to the shared model emitter). Domo's default is SUM — confirm which one this measure should use
 
 ## Verification checklist
 

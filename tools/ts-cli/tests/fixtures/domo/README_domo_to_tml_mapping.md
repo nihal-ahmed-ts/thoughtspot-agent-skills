@@ -12,16 +12,16 @@ Domo instance, so you can test end-to-end conversion logic, not just isolated ob
 | `domo_table_sales_transactions.json` | Dataset (table) | Worksheet source table |
 | `domo_table_customer_master.json` | Dataset (table) | Worksheet source table (for join testing) |
 | `domo_model_beastmodes.json` | Beast Modes (calculated fields) | Worksheet formulas |
-| `domo_card_606665948_kpi_net_revenue.json` | KPI Card | Answer (single metric / headline) |
-| `domo_card_917562931_bar_revenue_by_region.json` | Bar Chart Card | Answer (bar viz) |
-| `domo_card_1240307199_table_sales_rep_performance.json` | Table Card | Answer (tabular viz) |
+| `domo_card_500000001_kpi_net_revenue.json` | KPI Card | Answer (single metric / headline) |
+| `domo_card_500000002_bar_revenue_by_region.json` | Bar Chart Card | Answer (bar viz) |
+| `domo_card_500000003_table_sales_rep_performance.json` | Table Card | Answer (tabular viz) |
 | `domo_liveboard_page_sales_overview.json` | Page | Liveboard |
 
 ## How the IDs connect (for your parser to follow)
 
-- Both cards and the page reference `dataSetId` / dataset id `61c4e63d-0627-41f7-b138-74968ebd7634` (Sales Transactions).
+- Both cards and the page reference `dataSetId` / dataset id `00000001-0000-4000-8000-000000000001` (Sales Transactions).
 - All three Beast Modes in `domo_model_beastmodes.json` also reference that same `dataSourceId`.
-- The three card `urn` values (`606665948`, `917562931`, `1240307199`) are exactly the `cardIds` listed in the page file — this is how Domo links a Page to its Cards, and it's the relationship your Skill needs to resolve first before it can build a Liveboard's layout.
+- The three card `urn` values (`500000001`, `500000002`, `500000003`) are exactly the `cardIds` listed in the page file — this is how Domo links a Page to its Cards, and it's the relationship your Skill needs to resolve first before it can build a Liveboard's layout.
 - `calculatedFields` inside each card duplicate the Beast Mode formulas by name — in real Domo, a card can either reference a global Beast Mode or redefine the formula locally; both patterns are represented here so your Skill can handle either.
 
 ## Suggested conversion logic to test against these files

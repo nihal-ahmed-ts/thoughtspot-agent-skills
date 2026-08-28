@@ -1,19 +1,19 @@
 {
-  "id": 421696155,
+  "id": 900000002,
   "parentId": null,
   "name": "Sales Overview",
   "locked": false,
   "collectionIds": [],
   "cardIds": [
-    606665948,
-    917562931,
-    1240307199
+    500000001,
+    500000002,
+    500000003
   ],
   "owners": [
-    { "id": 8811501, "type": "USER", "displayName": "Fixture User 3" }
+    { "id": 900000004, "type": "USER", "displayName": "Fixture User 3" }
   ],
   "visibility": {
-    "userIds": [8811501, 587894148, 1893952720],
+    "userIds": [900000004, 900000003, 900000001],
     "groupIds": [55012]
   },
   "children": []

@@ -4,7 +4,7 @@
   "description": "Synthetic reference dataset for testing dataset-to-dataset joins during Domo -> ThoughtSpot migration",
   "rows": 3400,
   "owner": {
-    "id": 1893952720,
+    "id": 900000001,
     "type": "USER",
     "displayName": "Fixture User 2"
   },

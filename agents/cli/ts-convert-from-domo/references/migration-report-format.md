@@ -29,11 +29,11 @@ of the family so downstream tooling and the audit mode can read all converters u
       "ts_formula": "sum([Revenue]) - sum([Discount])", "status": "Migrated" }
   ],
   "cards": [
-    { "urn": "606665948", "title": "Net Revenue", "chart_type": "kpi",
+    { "urn": "500000001", "title": "Net Revenue", "chart_type": "kpi",
       "ts_chart": "KPI", "status": "Migrated", "notes": [] }
   ],
   "pages": [
-    { "domo_id": 421696155, "name": "Sales Overview",
+    { "domo_id": 900000002, "name": "Sales Overview",
       "ts_liveboard": "Sales Overview", "cards": 3, "tabs": 1, "status": "Migrated" }
   ],
   "notes": [
